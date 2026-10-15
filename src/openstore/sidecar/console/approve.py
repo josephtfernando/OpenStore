@@ -54,6 +54,11 @@ class ApproveContext:
     """Whether this Merchant accepts the `passkey` Authority **and** this deploy
     has an RP to run the ceremony with. Both, because offering a ceremony that
     cannot complete teaches the Consumer that the page lies."""
+    origin_mismatch_note: str = ""
+    """Operator note shown instead of the passkey button when the RP ID does
+    not match this deploy's origin (tunnel overrides, staging hosts). The
+    ceremony would die in the browser with `rp.id` unusable — hiding the
+    button says so up front. Empty means no mismatch to report."""
     demo: bool = True
 
 
@@ -174,6 +179,7 @@ def render_approve(
     enabled_methods: frozenset[PaymentMethod],
     demo: bool,
     passkey_enabled: bool = False,
+    origin_mismatch_note: str = "",
 ) -> str:
     """The page of record.
 
@@ -248,7 +254,13 @@ purchase.</p>
 <p class="note" id="passkey-status" role="status"></p>
 </section>"""
         if passkey_enabled
-        else ""
+        else (
+            f"""<section id="passkey-unavailable">
+<p class="note muted">Passkeys are unavailable on this address — {_e(origin_mismatch_note)} """
+            "Pay with the options above instead.</p>\n</section>"
+            if origin_mismatch_note
+            else ""
+        )
     )
 
     # The ceremony's own script, and **only** when the shop runs one. A page that
@@ -390,6 +402,7 @@ async def approve(request: Request) -> HTMLResponse | JSONResponse:
             enabled_methods=_context.enabled_methods,
             demo=_context.demo,
             passkey_enabled=_context.passkey_enabled,
+            origin_mismatch_note=_context.origin_mismatch_note,
         )
     )
 

@@ -185,7 +185,7 @@ async def build_state(store: ConsoleStore) -> ConsoleState:
             "/.well-known/ucp.json": ucp_card(),
             "/.well-known/jwks.json": jwks(),
         },
-        tools=mcp.tools_list(),
+        tools=mcp.tools_list(get_surface().requirements),
     )
 
 

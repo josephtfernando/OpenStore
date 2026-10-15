@@ -144,11 +144,11 @@ HTTP exposes six entry points:
 - the merchant console
 - the public receipt viewer Every protocol hits one money core. Translators accept only a well-formed foreign envelope. They call the core. They translate the answer back. Core Transcript bytes stay identical across envelopes. Conformance replays assert that property.
 
-### 4.3 Merchant truth and the nine doors
+### 4.3 Merchant truth and the trait doors
 
 The merchant system owns Product Groups, Catalogue Items, stock counts, and order rows. Stock, price, and thresholds live on the Catalogue Item. The Catalogue Item is the resolved variant. They never live on the group. The sidecar reads fresh at every Gate. It mirrors back idempotently over a narrow HTTP trait on the private network. Each call carries HMAC over the raw body. Each call enforces a 60-second replay window with nonce. Every mutating door takes an idempotency key. The trait answers refusals with closed codes only.
 
-The nine doors: `catalog.read`, `stock.read`, `reserve`, `commit`, `release`, `restock`, `orders.create`/`orders.read`, `orders.set-status`, `quote`. Door 9 (`quote`) is read-only and side-effect-free. Same inputs give same bytes any number of times. It carries no clock. Fulfillment ETAs are day counts, never dates. Midnight cannot produce a spurious `price-changed`. Door 2 returns exact integers. Every agent-facing response carries only an Availability Bucket (`in-stock`, `low-stock`, `sold-out`) cut at that item own threshold. An exact count handed to any self-registered stranger is an inventory-probing oracle.
+Nine doors are required: `catalog.read`, `stock.read`, `reserve`, `commit`, `release`, `restock`, `orders.create`/`orders.read`, `orders.set-status`, `quote`. Door 9 (`quote`) is read-only and side-effect-free. Same inputs give same bytes any number of times. It carries no clock. Fulfillment ETAs are day counts, never dates. Midnight cannot produce a spurious `price-changed`. Door 2 returns exact integers. Every agent-facing response carries only an Availability Bucket (`in-stock`, `low-stock`, `sold-out`) cut at that item own threshold. An exact count handed to any self-registered stranger is an inventory-probing oracle. An optional tenth door, `requirements.read`, declares buyer details beyond address and contact; Merchants without it serve the fixed buyer shape.
 
 Stock discipline: always `int >= 0`, never null, database-checked. Reserve is an atomic compare-and-set. It never drives stock negative. Version one never oversells. External (non-agent) sales win automatically. The next gate re-reads the lowered count. Webhooks and events are triggers only: unordered, duplicated, never guaranteed. The sidecar dedupes by `event_id` and runs a periodic reconciler poll.
 

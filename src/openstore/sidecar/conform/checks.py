@@ -235,6 +235,7 @@ async def run(base_url: str, secret: str, *, read_only: bool = False) -> Report:
 
         await _catalogue_checks(runner, client, subjects)
         await _quote_checks(runner, client, subjects)
+        await _requirements_checks(runner, client)
         if not read_only:
             await _order_checks(runner, client, subjects)
             await _hold_checks(runner, client, subjects)
@@ -396,6 +397,37 @@ async def _quote_checks(runner: _Runner, client: TraitClient, s: _Subjects) -> N
         a_group_id_where_a_sku_belongs_refuses,
     )
     await runner.check("door 9 — quote", "an orphan Add-on is refused", an_orphan_addon_refuses)
+
+
+# ── door 10 (optional) ───────────────────────────────────────────────────────
+
+
+async def _requirements_checks(runner: _Runner, client: TraitClient) -> None:
+    """Absence passes: a Merchant without door 10 serves the fixed shape.
+    Presence must be a valid declaration the sidecar can publish verbatim."""
+
+    async def declares_a_valid_shape_or_nothing() -> str:
+        declared = await client.requirements_read()
+        if declared is None:
+            raise _Skipped("no door 10 — the fixed buyer shape applies")
+        from openstore.sidecar.trait.models import MAX_REQUIREMENT_FIELDS
+
+        assert len(declared.fields) <= MAX_REQUIREMENT_FIELDS
+        assert len({f.key for f in declared.fields}) == len(declared.fields), (
+            "requirement keys must be unique"
+        )
+        pii = [f.key for f in declared.fields if f.pii]
+        assert not pii, (
+            f"declares pii:true ({', '.join(pii)}): the sidecar refuses such "
+            f"declarations until generic receipt commitments land"
+        )
+        return f"{len(declared.fields)} declared extras"
+
+    await runner.check(
+        "door 10 — requirements.read",
+        "declares a valid shape, or nothing at all",
+        declares_a_valid_shape_or_nothing,
+    )
 
 
 # ── door 7 ───────────────────────────────────────────────────────────────────

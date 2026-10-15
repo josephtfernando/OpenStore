@@ -328,7 +328,7 @@ A later rename of an option axis therefore cannot rewrite what was bought.
 ## 5. Merchant truth + stock trait (ADR-0001, Q40)
 
 Merchant system means store software that owns catalog and orders.
-Trait means narrow HTTP contract with 9 doors.
+Trait means narrow HTTP contract with 9 required doors plus 1 optional door.
 Availability Bucket means agent-facing stock label per variant.
 
 The Merchant system owns Product Groups.
@@ -342,11 +342,21 @@ One count for the tote lets black selling out mark red sold out.
 It points `reserve` compare-and-set at the wrong row.
 The sidecar reads fresh at every Gate.
 It mirrors back idempotently.
-The trait is narrow HTTP only with 9 doors.
-The doors are `catalog.read (1) / stock.read (2) / reserve (3) / commit (4) / release (5) / restock (6) / orders.create+read (7) / orders.set-status (8) / quote (9)`.
+The trait is narrow HTTP only with 9 required doors plus 1 optional door.
+The doors are `catalog.read (1) / stock.read (2) / reserve (3) / commit (4) / release (5) / restock (6) / orders.create+read (7) / orders.set-status (8) / quote (9)` and the optional `requirements.read (10)`.
 It uses HMAC plus idempotency keys.
 It never shares a DB, demo included.
 Door 9 is read-only and side-effect-free.
+Door 10 is read-only and side-effect-free.
+A Merchant without door 10 serves the fixed buyer shape.
+Door 10 declares buyer details beyond address and contact.
+Field types are string and enum only.
+At most 20 fields.
+Keys match `^[a-z][a-z0-9_]{0,63}$`.
+Values travel to door 9 and door 7 when set.
+Door 9 validates provided values and never refuses absence.
+Requiredness is enforced by the sidecar at start-checkout.
+Fields marked `pii: true` are refused until generic receipt commitments exist.
 Same inputs give same bytes, any number of times (ADR-0010).
 The sidecar owns the expiry clock.
 It calls `orders.set-status(expired)`.

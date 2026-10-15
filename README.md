@@ -195,9 +195,9 @@ The approve page and the receipt page are public routes inside authenticated pre
 - The ACP `completeCheckoutSession` step carries a delegated payment credential. The translator refuses that one step with a named code and returns the approve URL instead. The other ACP operations work normally.
 - Each protocol card shows its deviations inline, so no integrator reads it as unqualified conformance.
 
-### One merchant contract: the nine doors
+### One merchant contract: nine required doors, one optional
 
-The merchant system implements nine HTTP endpoints on the private network: `catalog.read`, `stock.read`, `reserve`, `commit`, `release`, `restock`, `orders.create` and `orders.read`, `orders.set-status`, and `quote`.
+The merchant system implements nine HTTP endpoints on the private network: `catalog.read`, `stock.read`, `reserve`, `commit`, `release`, `restock`, `orders.create` and `orders.read`, `orders.set-status`, and `quote`. An optional tenth, `requirements.read`, declares buyer details the shop asks for beyond address and contact.
 
 - Every call carries an HMAC signature over the raw body and a 60-second replay window.
 - Every mutating door takes an idempotency key.

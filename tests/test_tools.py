@@ -28,6 +28,26 @@ async def test_search_with_words_still_filters(trait: TraitClient) -> None:
     assert len(result["results"]) < len((await trait.catalog_read()).groups)
 
 
+def test_set_destination_accepts_generic_client_aliases() -> None:
+    basket = Basket(agent_id="a1")
+    tools.set_destination(
+        basket,
+        {
+            "address_line1": "147, A/16, Paneer Nagar Main Road",
+            "address_line2": "DABC Madhuram Apartments",
+            "city": "Chennai",
+            "locality": "Mogappair",
+            "country": "IN",
+            "phone": "12345678901",
+            "postal_code": "600037",
+            "state": "TN",
+        },
+    )
+    assert basket.destination is not None
+    assert basket.destination.city == "Chennai"
+    assert basket.destination.postal_code == "600037"
+
+
 def test_clear_basket_empties_everything_and_names_what_went() -> None:
     from openstore.sidecar.basket import Basket
     from openstore.sidecar.trait.models import Destination
@@ -177,3 +197,79 @@ async def test_search_carries_the_option_axes_of_each_group(trait: TraitClient) 
     group = next(g for g in catalog.groups if g.id == "tote")
     assert row["option_axes"] == group.option_axes
     assert row["option_axes"], "the seed tote has option axes"
+
+
+def test_refusals_carry_missing_and_offered_as_data() -> None:
+    """B-phase convention: every refusal an agent must recover from carries
+    machine-readable fields — missing keys, unknown keys, offered ids — so a
+    model retries from data, never by parsing the sentence."""
+    from openstore.sidecar.basket import Basket
+    from openstore.sidecar.protocols.tools import ToolRefused
+
+    basket = Basket(agent_id="a1")
+    try:
+        tools.set_destination(basket, {"address_line1": "", "city": "Chennai"})
+        raise AssertionError("should have refused")
+    except ToolRefused as refusal:
+        assert "state" in refusal.fields["missing"]
+        assert refusal.fields["unknown"] == []
+    try:
+        tools.set_contact(basket, {})
+        raise AssertionError("should have refused")
+    except ToolRefused as refusal:
+        assert refusal.fields["any_of"] == ["email", "phone"]
+
+
+def _slot_requirements(required: bool = False):
+    from openstore.sidecar.trait.models import RequirementField, Requirements
+
+    return Requirements(
+        fields=[
+            RequirementField(
+                key="delivery_slot",
+                type="enum",
+                required=required,
+                label="Delivery slot",
+                values=["morning", "evening"],
+            ),
+            RequirementField(key="delivery_instructions", type="string", required=False),
+        ]
+    )
+
+
+def test_set_details_merges_validates_and_clears() -> None:
+    from openstore.sidecar.basket import Basket
+    from openstore.sidecar.protocols.tools import ToolRefused, set_details
+
+    basket = Basket(agent_id="a1")
+    req = _slot_requirements()
+    out = set_details(basket, req, {"delivery_slot": "morning"})
+    assert out["details"] == {"delivery_slot": "morning"}
+    assert out["missing"] == []
+    # Unknown keys refuse with names, never disappear.
+    try:
+        set_details(basket, req, {"nope": "x"})
+        raise AssertionError("should have refused")
+    except ToolRefused as refusal:
+        assert refusal.fields["unknown"] == ["nope"]
+    # Invalid enum refuses with the valid set.
+    try:
+        set_details(basket, req, {"delivery_slot": "midnight"})
+        raise AssertionError("should have refused")
+    except ToolRefused as refusal:
+        assert "invalid" in refusal.fields
+    # Empty string clears.
+    set_details(basket, req, {"delivery_instructions": "call me"})
+    out = set_details(basket, req, {"delivery_instructions": ""})
+    assert out["details"] == {"delivery_slot": "morning"}
+
+
+def test_set_details_refuses_everything_without_a_declaration() -> None:
+    from openstore.sidecar.basket import Basket
+    from openstore.sidecar.protocols.tools import ToolRefused, set_details
+
+    try:
+        set_details(Basket(agent_id="a1"), None, {"anything": "x"})
+        raise AssertionError("should have refused")
+    except ToolRefused as refusal:
+        assert "no extra details" in refusal.detail

@@ -101,7 +101,7 @@ here is a red build (Specification §12). Generated from `core/codes.py`, diffed
 - `acp`
 - `ap2`
 
-## Trait doors (10)
+## Trait doors (11)
 - `catalog.read`
 - `stock.read`
 - `reserve`
@@ -112,6 +112,7 @@ here is a red build (Specification §12). Generated from `core/codes.py`, diffed
 - `orders.read`
 - `orders.set-status`
 - `quote`
+- `requirements.read`
 
 ## Gate checks (12)
 - `authority-present-and-accepted`
@@ -136,7 +137,7 @@ here is a red build (Specification §12). Generated from `core/codes.py`, diffed
 - `capture-block`
 - `release-block`
 
-## Tool names (14)
+## Tool names (15)
 - `search`
 - `read-item`
 - `add-line`
@@ -144,6 +145,7 @@ here is a red build (Specification §12). Generated from `core/codes.py`, diffed
 - `clear-basket`
 - `set-destination`
 - `set-contact`
+- `set-details`
 - `choose-fulfillment`
 - `apply-public-code`
 - `start-checkout`
@@ -239,6 +241,7 @@ The call site never chooses a status; this table does.
 | `clear-basket` | `build-basket` |
 | `set-destination` | `build-basket` |
 | `set-contact` | `build-basket` |
+| `set-details` | `build-basket` |
 | `choose-fulfillment` | `build-basket` |
 | `apply-public-code` | `build-basket` |
 | `start-checkout` | `start-checkout` |

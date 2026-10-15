@@ -207,3 +207,19 @@ def test_reconcile_catches_a_currency_swap() -> None:
     )
     assert not result.matches
     assert "USD" in result.detail
+
+
+def test_fake_links_point_at_the_deploys_origin() -> None:
+    """The tap redirect must land on the host the Consumer looks at, not the
+    demo default — otherwise a public deploy approves into localhost."""
+    from openstore.sidecar.provider.fake import FakeProvider
+
+    async def run() -> str:
+        link = await FakeProvider(public_origin="https://shop.example").make_link(
+            "ord_1", 100, "INR", expires_in_seconds=900
+        )
+        return link.url
+
+    import asyncio
+
+    assert asyncio.run(run()).startswith("https://shop.example/agentic/fake-pay/")

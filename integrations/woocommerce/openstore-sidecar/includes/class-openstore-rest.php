@@ -155,6 +155,10 @@ final class OpenStore_REST {
 				isset( $b['fulfillment_option_id'] ) ? (string) $b['fulfillment_option_id'] : null,
 				isset( $b['discount_code'] ) ? (string) $b['discount_code'] : null
 			),
+			// Door 10, optional: this adapter declares no extras, so buyers
+			// use the fixed shape. A store that needs more implements this
+			// door with its fields instead of removing the stub.
+			'requirements.read' => static fn( array $b ): array => array( 'fields' => array() ),
 		);
 	}
 }

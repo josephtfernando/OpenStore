@@ -637,7 +637,16 @@ def make_app(merchant: FakeMerchant, hmac_secret: str) -> FastAPI:
                 return JSONResponse(status_code=cached["status"], content=cached["body"])
 
         payload = json.loads(body) if body else {}
-        method = getattr(merchant, _DOOR_METHODS[which])
+        handler = _DOOR_METHODS.get(which)
+        if handler is None:
+            # An unimplemented optional door (door 10 on an older Merchant):
+            # absence is a supported answer, so this is 404 rather than a
+            # crash — the client's fallback turns it into the fixed shape.
+            return JSONResponse(
+                status_code=404,
+                content=TraitError(ReasonCode.NOT_FOUND, f"no door {which.value!r}").to_payload(),
+            )
+        method = getattr(merchant, handler)
         try:
             result = method(payload)
             status, content = 200, result

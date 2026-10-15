@@ -419,3 +419,95 @@ def test_an_addon_is_its_own_line_from_the_same_sku() -> None:
     basket.add("SD-GIFTWRAP", 1, parent="SD-TOTE-BLK-M")
 
     assert len(basket.lines) == 2
+
+
+def test_set_details_round_trips_declared_keys_over_mcp(sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    """Door 10 over the wire: declared keys merge, unknown keys refuse with
+    names, and `needs` names details while a required key is missing."""
+    from openstore.sidecar.basket import BasketStore
+    from openstore.sidecar.trait.models import RequirementField, Requirements
+
+    state = AgentSurface(
+        admission=Admission(),
+        limiter=RateLimiter(),
+        trait=object(),
+        baskets=BasketStore(sessionmaker=sessionmaker),
+        requirements=Requirements(
+            fields=[
+                RequirementField(
+                    key="delivery_slot",
+                    type="enum",
+                    required=True,
+                    values=["morning", "evening"],
+                )
+            ]
+        ),
+    )
+    configure_surface(state)
+    try:
+        with TestClient(app) as client:
+            configure_surface(state)
+            token = state.admission.issue_for_stranger("agent_d")
+            head = {"authorization": f"Bearer {token.token}"}
+
+            def call(args: dict) -> dict:
+                return client.post(
+                    "/agent/mcp", json=mcp_request("set-details", details=args), headers=head
+                ).json()
+
+            ok = call({"delivery_slot": "evening"})
+            assert ok["result"]["structuredContent"]["details"] == {"delivery_slot": "evening"}
+            assert "details" not in ok["result"]["structuredContent"].get("needs", [])
+
+            missing = call({"delivery_slot": ""})
+            assert "details" in missing["result"]["structuredContent"]["needs"]
+
+            unknown = call({"nope": "x"})
+            assert unknown["result"]["isError"] is True
+            assert unknown["result"]["structuredContent"]["error"]["unknown"] == ["nope"]
+    finally:
+        configure_surface(AgentSurface())
+
+
+def test_origin_rp_mismatch_hides_the_passkey_button_with_a_note() -> None:
+    """The tunnel failure, made visible at deploy time instead of tap time: a
+    ceremony minted for one host cannot run on another, so the page says so
+    rather than serving a button the browser refuses."""
+    from openstore.sidecar.app import _origin_rp_mismatch
+    from openstore.sidecar.console.approve import render_approve
+
+    assert _origin_rp_mismatch("https://shop.example", "shop.example") is False
+    assert _origin_rp_mismatch("https://pay.shop.example", "shop.example") is False
+    assert _origin_rp_mismatch("https://tunnel.example", "shop.example") is True
+
+    quote = {
+        "lines": [],
+        "discount_lines": [],
+        "fulfillment_options": [],
+        "fulfillment_chosen": {},
+        "tax_lines": [],
+        "total_minor": 100,
+    }
+    body = render_approve(
+        merchant_name="Shop",
+        quote=quote,
+        token="t",
+        expires_in_seconds=60,
+        enabled_methods=frozenset(),
+        demo=True,
+        passkey_enabled=False,
+        origin_mismatch_note="passkeys are set up for shop.example, not for tunnel.example",
+    )
+    assert "passkey-btn" not in body
+    assert "Passkeys are unavailable on this address" in body
+
+    plain = render_approve(
+        merchant_name="Shop",
+        quote=quote,
+        token="t",
+        expires_in_seconds=60,
+        enabled_methods=frozenset(),
+        demo=True,
+    )
+    assert "passkey-btn" not in plain
+    assert "passkey-unavailable" not in plain

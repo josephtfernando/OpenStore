@@ -31,7 +31,11 @@ from openstore.sidecar.core.codes import (
 from openstore.sidecar.trait.buckets import bucket_for, bucket_for_group, quantity_refusal_detail
 from openstore.sidecar.trait.client import TraitClient
 from openstore.sidecar.trait.errors import TraitError
-from openstore.sidecar.trait.models import Destination
+from openstore.sidecar.trait.models import (
+    MAX_REQUIREMENT_VALUE_LENGTH,
+    Destination,
+    Requirements,
+)
 
 
 class ToolRefused(Exception):
@@ -189,7 +193,12 @@ async def read_item(trait: TraitClient, group_id: str) -> dict[str, Any]:
 
 
 async def add_line(
-    trait: TraitClient, basket: Basket, sku: str, qty: int, parent: str | None
+    trait: TraitClient,
+    basket: Basket,
+    sku: str,
+    qty: int,
+    parent: str | None,
+    requirements: Requirements | None = None,
 ) -> dict[str, Any]:
     if qty < 1:
         raise ToolRefused(ReasonCode.NOT_FOUND, "A line needs a quantity of at least one.")
@@ -226,12 +235,15 @@ async def add_line(
         )
 
     basket.add(sku, qty, parent)
-    return await summary(trait, basket)
+    return await summary(trait, basket, requirements)
 
 
-async def summary(trait: TraitClient, basket: Basket) -> dict[str, Any]:
+async def summary(
+    trait: TraitClient, basket: Basket, requirements: Requirements | None = None
+) -> dict[str, Any]:
     """The basket as the Consumer would see it — priced by the Merchant, or not
     priced at all."""
+    missing_details = details_missing(requirements, basket.details)
     body: dict[str, Any] = {
         "cart_id": basket.cart_id,
         "lines": [
@@ -242,7 +254,10 @@ async def summary(trait: TraitClient, basket: Basket) -> dict[str, Any]:
         "contact_set": bool(basket.contact),
         "fulfillment_option_id": basket.fulfillment_option_id or None,
         "discount_code": basket.discount_code,
+        "details": dict(basket.details),
     }
+    if missing_details:
+        body["details_missing"] = missing_details
     if basket.quotable():
         assert basket.destination is not None
         quote, _ = await trait.quote(
@@ -250,10 +265,15 @@ async def summary(trait: TraitClient, basket: Basket) -> dict[str, Any]:
             basket.destination,
             fulfillment_option_id=basket.fulfillment_option_id,
             discount_code=basket.discount_code,
+            details=dict(basket.details) or None,
         )
         body["quote"] = quote.model_dump(mode="json")
         body["total_minor"] = quote.total_minor
         body["currency"] = quote.currency
+        if missing_details:
+            # Priced but not checkout-ready: required merchant details still
+            # missing. `needs` is how an agent learns that without guessing.
+            body["needs"] = ["details"]
     else:
         body["quote"] = None
         body["needs"] = [
@@ -265,6 +285,8 @@ async def summary(trait: TraitClient, basket: Basket) -> dict[str, Any]:
             )
             if missing
         ]
+        if missing_details:
+            body["needs"].append("details")
     return body
 
 
@@ -305,25 +327,87 @@ def _destination_fix(exc: ValidationError) -> str:
         for field, fix in _DESTINATION_FIXES
         if any(err["loc"][:1] == (field,) for err in exc.errors())
     ]
+    unknown = sorted(
+        {
+            str(err["loc"][-1])
+            for err in exc.errors()
+            if err.get("type") == "extra_forbidden" and err.get("loc")
+        }
+    )
     if not bad:
-        return (
+        base = (
             "That address needs a street address, a city, a 2-letter state code "
             "and a 6-digit postal code."
         )
-    if len(bad) == 1:
-        needs = bad[0]
+    elif len(bad) == 1:
+        base = f"That address needs {bad[0]}."
     elif len(bad) == 2:
-        needs = f"{bad[0]} and {bad[1]}"
+        base = f"That address needs {bad[0]} and {bad[1]}."
     else:
-        needs = f"{', '.join(bad[:-1])} and {bad[-1]}"
-    return f"That address needs {needs}."
+        base = f"That address needs {', '.join(bad[:-1])} and {bad[-1]}."
+    if unknown:
+        base += (
+            f" Unrecognized keys: {', '.join(unknown)} — use line1/line2/city/state/postal_code."
+        )
+    return base
+
+
+#: Aliases generic agent clients send for Destination fields (Merchant Center /
+#: UCP-style names). Normalized at the agent input boundary only — the Merchant
+#: trait contract (`Destination`, door schema) stays strict. First name wins;
+#: anything else (locality, phone, …) is dropped, not refused: it is data the
+#: shop does not quote on.
+_DESTINATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "line1": ("address_line1", "address1", "street", "street_address", "address"),
+    "line2": (
+        "address_line2",
+        "address2",
+    ),
+    "city": ("town",),
+    "state": ("region", "province"),
+    "postal_code": ("zip", "zip_code", "zipcode", "postalcode", "pincode", "pin"),
+    "country": (),
+}
+
+
+def _normalize_destination(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map aliases to canonical keys, drop unknowns, keep canonical first."""
+    lowered = {str(k).strip().lower(): v for k, v in payload.items()}
+    out: dict[str, Any] = {}
+    for canonical, aliases in _DESTINATION_ALIASES.items():
+        if canonical in lowered and lowered[canonical] not in (None, ""):
+            out[canonical] = lowered[canonical]
+            continue
+        for alias in aliases:
+            if alias in lowered and lowered[alias] not in (None, ""):
+                out[canonical] = lowered[alias]
+                break
+    # `country` defaults on the model; only pass it when actually sent.
+    return out
 
 
 def set_destination(basket: Basket, payload: dict[str, Any]) -> None:
+    """Refusals carry `missing` / `unknown` as data, not just prose: a generic
+    agent retries from fields, never by parsing the sentence."""
+    normalized = _normalize_destination(payload)
+    lowered_keys = {str(k).strip().lower() for k in payload}
+    known_keys = set(_DESTINATION_ALIASES) | {
+        alias for aliases in _DESTINATION_ALIASES.values() for alias in aliases
+    }
+    unknown = sorted(lowered_keys - known_keys - {""})
     try:
-        basket.destination = Destination.model_validate(payload)
+        basket.destination = Destination.model_validate(normalized)
     except ValidationError as exc:
-        raise ToolRefused(ReasonCode.NOT_FOUND, _destination_fix(exc)) from None
+        missing = [
+            field
+            for field, _ in _DESTINATION_FIXES
+            if any(err["loc"][:1] == (field,) for err in exc.errors())
+        ]
+        raise ToolRefused(
+            ReasonCode.NOT_FOUND,
+            _destination_fix(exc),
+            {"missing": missing, "unknown": unknown},
+        ) from None
     except Exception:  # noqa: BLE001 — anything else is still a shape problem
         raise ToolRefused(
             ReasonCode.NOT_FOUND,
@@ -341,8 +425,80 @@ def set_contact(basket: Basket, payload: dict[str, Any]) -> None:
         raise ToolRefused(
             ReasonCode.NOT_FOUND,
             "A Contact Point is an email, a phone, or both — and one is needed.",
+            {"missing": ["contact"], "any_of": ["email", "phone"]},
         )
     basket.contact = contact
+
+
+def details_missing(
+    requirements: Requirements | None, details: dict[str, str]
+) -> list[str]:
+    """Required merchant keys with no value. Empty when the shop declares
+    nothing — no declaration means nothing to miss."""
+    if requirements is None:
+        return []
+    return [f.key for f in requirements.fields if f.required and not details.get(f.key)]
+
+
+def set_details(
+    basket: Basket, requirements: Requirements | None, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge one shop's own extras into the basket, validated against the
+    merchant's declaration. Partial sets allowed — requiredness is enforced at
+    `summary`/`start-checkout`, not here, so an agent can build piece by piece.
+    An empty-string value clears a key. Unknown keys refuse with names rather
+    than disappearing: silently dropping a field the agent thought it set is
+    how a delivery goes to the wrong slot."""
+    if requirements is None or not requirements.fields:
+        raise ToolRefused(
+            ReasonCode.NOT_FOUND,
+            "This shop declares no extra details — address and contact are all it asks.",
+        )
+    declared = {f.key: f for f in requirements.fields}
+    unknown = sorted(str(k) for k in payload if str(k) not in declared)
+    if unknown:
+        raise ToolRefused(
+            ReasonCode.NOT_FOUND,
+            f"Unrecognized detail keys: {', '.join(unknown)} — this shop asks for: "
+            f"{', '.join(f.key for f in requirements.fields)}.",
+            {"unknown": unknown, "declared": [f.key for f in requirements.fields]},
+        )
+    invalid: dict[str, str] = {}
+    merged = dict(basket.details)
+    for key, field in declared.items():
+        if key not in payload:
+            continue
+        value = payload[key]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            merged.pop(key, None)
+            continue
+        if not isinstance(value, str):
+            invalid[key] = f"must be a string, not {type(value).__name__}"
+            continue
+        if len(value) > MAX_REQUIREMENT_VALUE_LENGTH:
+            invalid[key] = f"at most {MAX_REQUIREMENT_VALUE_LENGTH} characters"
+            continue
+        if field.type == "enum" and value not in field.values:
+            invalid[key] = f"must be one of: {', '.join(field.values)}"
+            continue
+        if field.pattern:
+            import re as _re
+
+            if not _re.fullmatch(field.pattern, value):
+                invalid[key] = "does not match this shop's pattern"
+                continue
+        merged[key] = value
+    if invalid:
+        raise ToolRefused(
+            ReasonCode.NOT_FOUND,
+            f"These details do not fit what the shop asks: {', '.join(sorted(invalid))}.",
+            {"invalid": invalid},
+        )
+    basket.details = merged
+    # Details ride into the quote, so a change re-prices: same rule as lines
+    # and Destination — the chosen option no longer applies to it.
+    basket.fulfillment_option_id = ""
+    return {"details": dict(merged), "missing": details_missing(requirements, merged)}
 
 
 def clear_basket(basket: Basket) -> dict[str, Any]:
@@ -365,6 +521,7 @@ def clear_basket(basket: Basket) -> dict[str, Any]:
     basket.contact = {}
     basket.fulfillment_option_id = ""
     basket.discount_code = None
+    basket.details = {}
     basket.cart_id = f"cart_{secrets.token_hex(8)}"
     return {
         "cleared": True,
@@ -374,19 +531,30 @@ def clear_basket(basket: Basket) -> dict[str, Any]:
     }
 
 
-async def choose_fulfillment(trait: TraitClient, basket: Basket, option_id: str) -> dict[str, Any]:
+async def choose_fulfillment(
+    trait: TraitClient,
+    basket: Basket,
+    option_id: str,
+    requirements: Requirements | None = None,
+) -> dict[str, Any]:
     options = await fulfillment_options(trait, basket)
-    if option_id not in {o["id"] for o in options["options"]}:
+    offered = [str(o["id"]) for o in options["options"]]
+    if option_id not in set(offered):
         raise ToolRefused(
             ReasonCode.NOT_FOUND,
-            f"{option_id!r} is not offered for that Destination. Offered: "
-            f"{', '.join(str(o['id']) for o in options['options'])}",
+            f"{option_id!r} is not offered for that Destination. Offered: " f"{', '.join(offered)}",
+            {"offered": offered},
         )
     basket.fulfillment_option_id = option_id
-    return await summary(trait, basket)
+    return await summary(trait, basket, requirements)
 
 
-async def apply_public_code(trait: TraitClient, basket: Basket, code: str) -> dict[str, Any]:
+async def apply_public_code(
+    trait: TraitClient,
+    basket: Basket,
+    code: str,
+    requirements: Requirements | None = None,
+) -> dict[str, Any]:
     """Public codes only. A private code is entered by the Consumer on the
     approve page and never travels through an agent (ADR-0015)."""
     if not basket.quotable():
@@ -398,7 +566,7 @@ async def apply_public_code(trait: TraitClient, basket: Basket, code: str) -> di
     previous = basket.discount_code
     basket.discount_code = code
     try:
-        return await summary(trait, basket)
+        return await summary(trait, basket, requirements)
     except TraitError as exc:
         basket.discount_code = previous
         raise ToolRefused(exc.code, exc.detail) from None

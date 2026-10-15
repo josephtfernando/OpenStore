@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS orders (
   -- erasure action apply; erasure is refused while the order is live.
   destination     JSONB,
   contact         JSONB,
+  -- Door-10 buyer details (delivery slot, instructions). Non-PII only until
+  -- generic receipt commitments land; never part of tax/address semantics.
+  details         JSONB NOT NULL DEFAULT '{}',
   payer_handle    TEXT,
   erased_at       TIMESTAMPTZ,
 
@@ -188,3 +191,6 @@ CREATE TABLE IF NOT EXISTS idempotency (
   body        JSONB NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Door-10 details column for databases created before it existed.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}';

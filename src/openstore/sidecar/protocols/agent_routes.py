@@ -94,6 +94,15 @@ class AgentSurface:
     events: EventStore = field(default_factory=EventStore)
     limiter: RateLimiter = field(default_factory=RateLimiter)
     fetcher: ProfileFetcher = field(default_factory=ProfileFetcher)
+    oauth_server: Any = None
+    """OAuth DCR registry for stock MCP clients.
+    `None` means unconfigured — the metadata still advertises, but register
+    refuses until boot wires one. Tests inject their own."""
+    requirements: Any = None
+    """Cached door-10 declaration for this Merchant. `None` means the Merchant
+    declares nothing (or the fetch has not run) and the sidecar serves the
+    fixed buyer shape. Refreshed in the background; routes only ever read the
+    snapshot, never the trait, so discovery stays up when the Merchant is down."""
     jwks: dict[str, Any] = field(default_factory=lambda: {"keys": []})
     keyring: Any = None
     """A `Keyring`. Held so a receipt can be sealed by the key this surface
@@ -129,11 +138,52 @@ BASKET_TOOLS: frozenset[ToolName] = frozenset(
         ToolName.CLEAR_BASKET,
         ToolName.SET_DESTINATION,
         ToolName.SET_CONTACT,
+        ToolName.SET_DETAILS,
         ToolName.CHOOSE_FULFILLMENT,
         ToolName.APPLY_PUBLIC_CODE,
         ToolName.START_CHECKOUT,
     }
 )
+
+#: How often the door-10 snapshot refreshes. An int, like every other
+#: sidecar timeout — no floats in this process.
+REQUIREMENTS_REFRESH_SECONDS = 300
+
+
+async def refresh_requirements() -> None:
+    """One snapshot fetch. Failure keeps the last snapshot (or the fixed shape
+    at boot): discovery must never brick because the Merchant sneezed.
+
+    A declaration containing `pii: true` is refused as a whole until generic
+    receipt commitments land (A2) — storing dynamic PII anywhere would break
+    the privacy-by-structure rule, so the Merchant keeps the fixed shape and
+    the refusal is loud in the boot log rather than silent at the edge.
+    """
+    import logging
+
+    trait = _surface.trait
+    if trait is None:
+        return
+    try:
+        declared = await trait.requirements_read()
+    except Exception as exc:  # noqa: BLE001 — any trait failure keeps the snapshot
+        logging.getLogger("openstore").warning("requirements refresh failed: %s", exc)
+        return
+    if declared is None:
+        if _surface.requirements is not None:
+            _surface.requirements = None
+        return
+    pii_keys = [f.key for f in declared.fields if f.pii]
+    if pii_keys:
+        logging.getLogger("openstore").warning(
+            "requirements declaring pii:true refused (%s): generic receipt commitments "
+            "are not implemented yet, so dynamic PII cannot be stored. Serving the "
+            "fixed buyer shape.",
+            ", ".join(pii_keys),
+        )
+        _surface.requirements = None
+        return
+    _surface.requirements = declared
 
 _surface = AgentSurface()
 
@@ -178,6 +228,26 @@ def _limit(request: Request, bucket: str, subject: str, tier: Tier) -> JSONRespo
 def card() -> dict[str, Any]:
     """Public and unauthenticated by design. A card behind a login is a card no
     new agent can read."""
+    snapshot = _surface.requirements
+    extras: tuple[dict[str, Any], ...] = ()
+    fields = getattr(snapshot, "fields", None) or ()
+    if fields:
+        rendered = []
+        for field in fields:
+            entry: dict[str, Any] = {
+                "name": field.key,
+                "required": field.required,
+            }
+            if field.label:
+                entry["label"] = field.label
+            if field.description:
+                entry["description"] = field.description
+            if field.type == "enum":
+                entry["values"] = list(field.values)
+            if field.pattern:
+                entry["pattern"] = field.pattern
+            rendered.append(entry)
+        extras = tuple(rendered)
     return agent_commerce_card(
         merchant_domain=_surface.merchant_domain,
         merchant_name=_surface.merchant_name,
@@ -188,6 +258,7 @@ def card() -> dict[str, Any]:
         description=_surface.merchant_description,
         categories=_surface.merchant_categories,
         limits=policy_limits(_surface.policy),
+        requirement_fields=extras,
     )
 
 
@@ -310,7 +381,7 @@ def _bearer(request: Request) -> AgentToken | None:
 def tools_list(request: Request) -> JSONResponse:
     """`tools/list`. Public: an agent should be able to see what a shop offers
     before deciding whether to register."""
-    return JSONResponse({"tools": mcp.tools_list()})
+    return JSONResponse({"tools": mcp.tools_list(_surface.requirements)})
 
 
 def _jsonrpc_error(id_: Any, code: int, message: str) -> JSONResponse:
@@ -426,8 +497,10 @@ async def mcp_call(request: Request) -> JSONResponse:
     except ToolRefused as refusal:
         return _jsonrpc_result(id_, mcp.call_error(refusal.code, refusal.detail, **refusal.fields))
     except TraitError as exc:
-        # The Merchant refused. Its reason is better than any we could invent.
-        return _jsonrpc_result(id_, mcp.call_error(exc.code, exc.detail))
+        # The Merchant refused. Its reason is better than any we could invent —
+        # and its fields ride along verbatim, so a structured merchant refusal
+        # (missing/invalid) reaches the agent as data, not prose.
+        return _jsonrpc_result(id_, mcp.call_error(exc.code, exc.detail, **exc.fields))
 
     # Stored only on success. A refusal is not an outcome worth replaying: the
     # agent that fixes its arguments and retries with the same key is asking a
@@ -527,19 +600,26 @@ async def _dispatch(
             str(payload.get("sku", "")),
             int(payload.get("qty", 1)),
             str(parent) if parent else None,
+            _surface.requirements,
         )
     if tool is ToolName.REMOVE_LINE:
         if not cart().remove(str(payload.get("sku", ""))):
             raise ToolRefused(ReasonCode.NOT_FOUND, "That SKU is not in the basket.")
-        return await tools.summary(merchant(), cart())
+        return await tools.summary(merchant(), cart(), _surface.requirements)
     if tool is ToolName.CLEAR_BASKET:
         return tools.clear_basket(cart())
     if tool is ToolName.SET_DESTINATION:
         tools.set_destination(cart(), dict(payload.get("destination") or payload))
-        return await tools.summary(merchant(), cart())
+        return await tools.summary(merchant(), cart(), _surface.requirements)
     if tool is ToolName.SET_CONTACT:
         tools.set_contact(cart(), dict(payload.get("contact") or payload))
-        return await tools.summary(merchant(), cart())
+        return await tools.summary(merchant(), cart(), _surface.requirements)
+    if tool is ToolName.SET_DETAILS:
+        result = tools.set_details(
+            cart(), _surface.requirements, dict(payload.get("details") or payload)
+        )
+        summary = await tools.summary(merchant(), cart(), _surface.requirements)
+        return {**summary, **result}
     if tool is ToolName.CHOOSE_FULFILLMENT:
         option = str(payload.get("id", ""))
         if not option:
@@ -555,22 +635,36 @@ async def _dispatch(
                     "Nothing is chosen yet. Call choose-fulfillment again with one of these ids."
                 ),
             }
-        return await tools.choose_fulfillment(merchant(), cart(), option)
+        return await tools.choose_fulfillment(
+            merchant(), cart(), option, _surface.requirements
+        )
     if tool is ToolName.APPLY_PUBLIC_CODE:
-        return await tools.apply_public_code(merchant(), cart(), str(payload.get("code", "")))
+        return await tools.apply_public_code(
+            merchant(), cart(), str(payload.get("code", "")), _surface.requirements
+        )
 
     if tool is ToolName.START_CHECKOUT:
         if not cart().quotable():
-            summary = await tools.summary(merchant(), cart())
+            summary = await tools.summary(merchant(), cart(), _surface.requirements)
+            needs = list(summary.get("needs", []))
             raise ToolRefused(
                 ReasonCode.NOT_FOUND,
-                f"This basket is not ready to check out; it still needs: "
-                f"{', '.join(summary.get('needs', []))}.",
+                f"This basket is not ready to check out; it still needs: " f"{', '.join(needs)}.",
+                {"missing": needs},
             )
         if not cart().contact:
             raise ToolRefused(
                 ReasonCode.NOT_FOUND,
                 "The shop needs a Contact Point to send the order confirmation to.",
+                {"missing": ["contact"], "any_of": ["email", "phone"]},
+            )
+        missing_details = tools.details_missing(_surface.requirements, cart().details)
+        if missing_details:
+            raise ToolRefused(
+                ReasonCode.NOT_FOUND,
+                "This shop asks for extra details before checkout; still missing: "
+                f"{', '.join(missing_details)}. Use set-details.",
+                {"missing": ["details"], "details_missing": missing_details},
             )
         destination = cart().destination
         assert destination is not None
@@ -584,6 +678,7 @@ async def _dispatch(
             method=tools.method_for(str(payload.get("method", "upi"))),
             agent_id=agent_id,
             discount_code=cart().discount_code,
+            details=dict(cart().details) or None,
         )
         return {
             "order_id": checkout.order_id,

@@ -1,5 +1,9 @@
 /**
- * The nine doors, implemented natively over HTTP on the private network.
+ * The trait doors, implemented natively over HTTP on the private network.
+ *
+ * Nine doors are required; `requirements.read` (door 10) is optional. This
+ * shop implements it: two non-PII extras. Anything `pii: true` stays out
+ * until the sidecar can commit to dynamic PII in receipts.
  *
  * This is the second implementation of the trait contract (§6.1). The sidecar's
  * conformance suite runs against it unmodified — that is the only real proof
@@ -240,12 +244,14 @@ export async function quote(
 		lines,
 		destination,
 		fulfillment_option_id,
-		discount_code
+		discount_code,
+		details
 	}: {
 		lines: Line[];
 		destination: Destination;
 		fulfillment_option_id?: string;
 		discount_code?: string;
+		details?: Record<string, string>;
 	}
 ): Promise<Quote> {
 	const unserviceable = await sql<{ prefix: string }[]>`SELECT prefix FROM unserviceable_postal_ranges`;
@@ -256,6 +262,20 @@ export async function quote(
 				`We do not deliver to ${destination.postal_code} yet.`,
 				{ postal_code: destination.postal_code }
 			);
+		}
+	}
+
+	// Door-10 values, validated for meaning (the sidecar already validated
+	// shape). Absence is never refused here: requiredness is the sidecar's
+	// gate at start-checkout, and `fulfillment_options` quotes before details
+	// exist. An invalid *provided* value refuses with the valid set as data.
+	if (details && Object.keys(details).length) {
+		const slot = details['delivery_slot'];
+		if (slot !== undefined && !DELIVERY_SLOTS.includes(slot)) {
+			throw new DoorError('not-found', `delivery_slot ${JSON.stringify(slot)} is not a slot we run.`, {
+				invalid: { delivery_slot: 'must be one of the offered slots' },
+				valid_values: DELIVERY_SLOTS
+			});
 		}
 	}
 
@@ -333,25 +353,55 @@ export async function ordersCreate(
 		agent_id?: string;
 		consumer_id?: string;
 		order_id_hint?: string;
+		details?: Record<string, string>;
 	}
 ) {
 	const priced = await quote(sql, {
 		lines: payload.lines,
 		destination: payload.destination,
-		fulfillment_option_id: payload.fulfillment_option_id
+		fulfillment_option_id: payload.fulfillment_option_id,
+		details: payload.details
 	});
 	const order_id = payload.order_id_hint ?? `ord_${randomBytes(8).toString('hex')}`;
 	const salt = randomBytes(16).toString('hex');
 
 	await sql`INSERT INTO orders (order_id, cart_id, status, lines, quote, total_minor,
-	                              destination, contact, agent_id, consumer_id, order_salt, receipt_id)
+	                              destination, contact, details, agent_id, consumer_id, order_salt, receipt_id)
 	          VALUES (${order_id}, ${payload.cart_id}, 'pending', ${sql.json(payload.lines)},
 	                  ${sql.json(priced)}, ${priced.total_minor},
 	                  ${sql.json(payload.destination)}, ${sql.json(payload.contact)},
+	                  ${sql.json(payload.details ?? {})},
 	                  ${payload.agent_id ?? ''}, ${payload.consumer_id ?? ''},
 	                  ${salt}, ${`rcpt_${randomBytes(16).toString('hex')}`})`;
 
 	return { order_id, order_salt_hex: salt, status: 'pending' };
+}
+
+/** Door 10 (optional): what this shop asks beyond address + contact. */
+export const DELIVERY_SLOTS = ['morning', 'afternoon', 'evening'];
+
+export async function requirementsRead() {
+	return {
+		fields: [
+			{
+				key: 'delivery_slot',
+				type: 'enum',
+				required: false,
+				pii: false,
+				label: 'Delivery slot',
+				description: 'When should the rider arrive? Morning 8–12, afternoon 12–4, evening 4–8.',
+				values: DELIVERY_SLOTS
+			},
+			{
+				key: 'delivery_instructions',
+				type: 'string',
+				required: false,
+				pii: false,
+				label: 'Delivery instructions',
+				description: 'Gate code, floor, landmark — anything the rider needs. 500 chars max.'
+			}
+		]
+	};
 }
 
 /** Door 7 (read). The salt is never here. */

@@ -10,7 +10,10 @@ will be — the money lint refuses one.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openstore.sidecar.core.codes import AvailabilityBucket, OrderStatus
 
@@ -174,6 +177,66 @@ class Order(Strict):
     dispatched_at: str | None = None
     invoice_number: str | None = None
     expires_at: str | None = None
+
+
+# ── Merchant-declared buyer requirements (door 10, optional) ───────────────
+
+
+#: Caps, decided once: a declaration lands in stranger agents' context
+#: windows, so an unbounded one is an amplification attack by a compromised
+#: Merchant, not a tidy schema.
+MAX_REQUIREMENT_FIELDS = 20
+MAX_REQUIREMENT_KEY_LENGTH = 64
+MAX_REQUIREMENT_VALUE_LENGTH = 500
+MAX_REQUIREMENT_ENUM_VALUES = 20
+
+
+class RequirementField(Strict):
+    """One buyer detail this Merchant asks for (delivery slot, instructions…).
+
+    Flat scalar only — no nested objects. `pii` marks data the receipt must
+    commit to and erase; the sidecar refuses `pii: true` declarations until
+    the evidence model supports generic commitments (A2).
+    """
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    type: Literal["string", "enum"] = "string"
+    required: bool = False
+    pii: bool = False
+    label: str = Field(default="", max_length=100)
+    description: str = Field(default="", max_length=300)
+    pattern: str = Field(default="", max_length=300)
+    values: list[str] = Field(default_factory=list)
+
+
+class Requirements(Strict):
+    """Door 10 response: what this shop asks beyond address + contact."""
+
+    fields: list[RequirementField] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_declaration(self) -> Requirements:
+        if len(self.fields) > MAX_REQUIREMENT_FIELDS:
+            raise ValueError(f"at most {MAX_REQUIREMENT_FIELDS} requirement fields")
+        keys = [f.key for f in self.fields]
+        if len(set(keys)) != len(keys):
+            raise ValueError("requirement keys must be unique")
+        for field in self.fields:
+            if field.type == "enum" and not (1 <= len(field.values) <= MAX_REQUIREMENT_ENUM_VALUES):
+                raise ValueError(f"{field.key!r}: enum needs 1 to {MAX_REQUIREMENT_ENUM_VALUES} values")
+            if field.type != "enum" and field.values:
+                raise ValueError(f"{field.key!r}: values only apply to enum fields")
+            if field.pattern:
+                try:
+                    re.compile(field.pattern)
+                except re.error:
+                    raise ValueError(f"{field.key!r}: pattern does not compile")
+                if field.type == "enum":
+                    raise ValueError(f"{field.key!r}: pattern does not apply to enum fields")
+        return self
+
+    def required_keys(self) -> list[str]:
+        return [f.key for f in self.fields if f.required]
 
 
 # ── Stock, as the agent is allowed to see it ─────────────────────────────────

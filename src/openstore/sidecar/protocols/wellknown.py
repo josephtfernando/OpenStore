@@ -40,6 +40,7 @@ def agent_commerce_card(
     description: str = "",
     categories: tuple[str, ...] = (),
     limits: dict[str, Any] | None = None,
+    requirement_fields: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     """`origin` is the origin an agent should dial back on, and it is passed in
     rather than derived: a card that assumes `https://<domain>` advertises an
@@ -113,7 +114,7 @@ def agent_commerce_card(
             ),
         },
         "limits": limits or {},
-        "requires": checkout_requirements(),
+        "requires": checkout_requirements(requirement_fields=requirement_fields),
         "conformance": [badge(protocol, enabled_methods) for protocol in TOGGLE_ORDER],
     }
 
@@ -215,7 +216,9 @@ def api_version() -> dict[str, Any]:
     }
 
 
-def checkout_requirements() -> dict[str, Any]:
+def checkout_requirements(
+    requirement_fields: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any]:
     """What a basket needs before this shop will quote it.
 
     An agent learns all of this today by being refused: the Destination shape
@@ -242,7 +245,7 @@ def checkout_requirements() -> dict[str, Any]:
             field_["default"] = spec["default"]
         fields.append(field_)
 
-    return {
+    requirements: dict[str, Any] = {
         "destination": {"fields": fields},
         "contact": {
             # Not a schema: the rule is "at least one of these", which a field
@@ -257,6 +260,16 @@ def checkout_requirements() -> dict[str, Any]:
             "option picked before the last line went in has to be picked again."
         ),
     }
+    if requirement_fields:
+        # Door-10 extras, rendered from the snapshot the tools serve — one
+        # vocabulary in card and tools, or an agent trusts one and is refused
+        # by the other.
+        requirements["details"] = {
+            "fields": list(requirement_fields),
+            "note": "Set with set-details, in pieces if needed. Required keys must hold before checkout.",
+        }
+        requirements["order"] = ["lines", "destination", "details", "fulfillment"]
+    return requirements
 
 
 def policy_limits(policy: Policy) -> dict[str, Any]:

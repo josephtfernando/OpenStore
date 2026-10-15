@@ -39,7 +39,8 @@ const HANDLERS: Record<string, (body: any) => Promise<unknown>> = {
 	'orders.create': (b) => doors.ordersCreate(sql, b),
 	'orders.read': (b) => doors.ordersRead(sql, b.order_id),
 	'orders.set-status': (b) => doors.ordersSetStatus(sql, b),
-	quote: (b) => doors.quote(sql, b)
+	quote: (b) => doors.quote(sql, b),
+	'requirements.read': () => doors.requirementsRead()
 };
 
 export const POST: RequestHandler = async ({ params, request }) => {

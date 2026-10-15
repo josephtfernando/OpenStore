@@ -354,12 +354,48 @@
           "lines": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/line" } },
           "destination": { "$ref": "#/$defs/destination" },
           "fulfillment_option_id": { "type": "string", "minLength": 1 },
-          "discount_code": { "type": "string", "minLength": 1 }
+          "discount_code": { "type": "string", "minLength": 1 },
+          "details": { "type": "object", "maxProperties": 20 }
         }
       },
       "response": {
         "$ref": "https://openstore.dev/schema/quote.schema.json",
         "description": "Read-only, side-effect-free, byte-identical for identical inputs against unchanged state. Not time-invariant, deliberately: a price edit or an exhausted code changes the answer, which is what quote-fresh exists to catch."
+      }
+    },
+
+    "requirements.read": {
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fields"],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "type"],
+              "properties": {
+                "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+                "type": { "type": "string", "enum": ["string", "enum"] },
+                "required": { "type": "boolean" },
+                "pii": { "type": "boolean" },
+                "label": { "type": "string", "maxLength": 100 },
+                "description": { "type": "string", "maxLength": 300 },
+                "pattern": { "type": "string", "maxLength": 300 },
+                "values": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 100 } }
+              }
+            }
+          }
+        },
+        "description": "Door 10, optional and read-only. Buyer details this Merchant asks for beyond address + contact. Absent on Merchants that do not implement it — the sidecar then serves the fixed shape. pii:true declarations are refused by the sidecar until generic receipt commitments land."
       }
     }
   }

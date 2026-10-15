@@ -1,4 +1,4 @@
-"""The nine-door client. HTTP only, HMAC-signed, idempotent where it mutates.
+"""The trait client. HTTP only, HMAC-signed, idempotent where it mutates.
 
 There is no other way for the sidecar to reach Merchant truth: no shared
 database, no shared module, no import. The Merchant owns Product Groups,
@@ -35,6 +35,7 @@ from openstore.sidecar.trait.models import (
     Order,
     OrderCreated,
     Quote,
+    Requirements,
 )
 from openstore.sidecar.trait.signing import (
     IDEMPOTENCY_HEADER,
@@ -68,7 +69,8 @@ def cart_idempotency_key(cart_id: str, attempt: int) -> str:
 
 
 class TraitClient:
-    """A Merchant, as the sidecar sees it: nine doors and nothing else."""
+    """A Merchant, as the sidecar sees it: nine required doors plus the
+    optional `requirements.read` (door 10), and nothing else."""
 
     def __init__(
         self,
@@ -141,7 +143,7 @@ class TraitClient:
 
         return parsed
 
-    # ── the nine doors ───────────────────────────────────────────────────────
+    # ── the nine required doors + the optional tenth ─────────────────────────
 
     async def catalog_read(self, since: str | None = None) -> Catalog:
         """Door 1."""
@@ -231,6 +233,7 @@ class TraitClient:
         agent_id: str | None = None,
         consumer_id: str | None = None,
         order_id_hint: str | None = None,
+        details: dict[str, str] | None = None,
     ) -> OrderCreated:
         """Door 7 (create). Keys on `cart_id:attempt`, and returns the
         `order_salt` — the only response that ever does (§6.3a)."""
@@ -245,6 +248,10 @@ class TraitClient:
             payload["agent_id"] = agent_id
         if consumer_id:
             payload["consumer_id"] = consumer_id
+        if details:
+            # Only when non-empty: an always-present key would trip Merchants
+            # whose door-7 schema predates details.
+            payload["details"] = details
         if order_id_hint:
             # Tests and golden replays only: lets a replay name its own order so
             # the Transcript bytes are comparable. A Merchant is free to ignore
@@ -281,6 +288,7 @@ class TraitClient:
         *,
         fulfillment_option_id: str | None = None,
         discount_code: str | None = None,
+        details: dict[str, str] | None = None,
     ) -> tuple[Quote, bytes]:
         """Door 9. Read-only, side-effect-free, byte-identical for identical
         inputs against unchanged state.
@@ -298,11 +306,28 @@ class TraitClient:
             payload["fulfillment_option_id"] = fulfillment_option_id
         if discount_code:
             payload["discount_code"] = discount_code
+        if details:
+            # Only when non-empty: an always-present key would trip Merchants
+            # whose door-9 schema predates details.
+            payload["details"] = details
 
         raw = await self._call(Door.QUOTE, payload)
         quote = Quote.model_validate(raw)
         canonical = json.dumps(raw, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return quote, canonical
+
+    async def requirements_read(self) -> Requirements | None:
+        """Door 10 (optional). `None` means the Merchant does not implement it
+        and the sidecar serves the fixed buyer shape — absence is a supported
+        answer here, not a failure, so `not-found` from this door falls back
+        instead of refusing."""
+        try:
+            raw = await self._call(Door.REQUIREMENTS_READ, {})
+        except TraitError as exc:
+            if exc.code is ReasonCode.NOT_FOUND:
+                return None
+            raise
+        return Requirements.model_validate(raw)
 
 
 __all__ = [

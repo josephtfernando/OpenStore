@@ -209,6 +209,30 @@ def test_place_order_says_it_returns_an_approve_url_not_an_order() -> None:
     assert "never an order" in entry["description"]
 
 
+def test_destination_schema_names_fields_patterns_and_aliases() -> None:
+    entry = next(t for t in mcp.tools_list() if t["name"] == "set-destination")
+    dest = entry["inputSchema"]["properties"]["destination"]
+    assert set(dest["required"]) == {"line1", "city", "state", "postal_code"}
+    assert dest["properties"]["state"]["pattern"] == "^[A-Z]{2}$"
+    assert dest["properties"]["postal_code"]["pattern"] == "^[0-9]{6}$"
+    assert "address_line1" in dest["properties"]["line1"]["description"]
+    contact = next(t for t in mcp.tools_list() if t["name"] == "set-contact")
+    assert "email" in contact["inputSchema"]["properties"]["contact"]["properties"]
+
+
+def test_descriptions_guide_a_model_with_no_prior_knowledge() -> None:
+    """Generic-client hardening: each step states its prerequisites and its
+    next step, in plain words, so a weaker model need not infer the workflow."""
+    by_name = {t["name"]: t for t in mcp.tools_list()}
+    assert "add-line" in by_name["read-item"]["description"]
+    assert "approve page" in by_name["apply-public-code"]["description"]
+    assert "place-order" in by_name["start-checkout"]["description"]
+    assert "request-refund" in by_name["cancel-order"]["description"]
+    assert "no money" in by_name["request-refund"]["description"]
+    # choose-fulfillment lists when id is omitted — the schema must allow that.
+    assert "required" not in by_name["choose-fulfillment"]["inputSchema"]
+
+
 def test_a_tool_call_without_its_scope_is_refused_before_the_body_runs() -> None:
     from dataclasses import replace
 

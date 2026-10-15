@@ -339,11 +339,18 @@ async def start(
     method: PaymentMethod = PaymentMethod.UPI,
     agent_id: str = "",
     discount_code: str | None = None,
+    details: dict[str, str] | None = None,
 ) -> Pending:
     """Create the order, quote it, and mint the tap token over that exact total.
 
     No stock is held and no money moves here. The order is `pending`, which is
     the Quote's validity window and not an inventory hold.
+
+    `details` are door-10 buyer metadata (delivery slot, instructions). They
+    ride to the Merchant's order row and into its quote validation, never into
+    the Gate: `quote-fresh` byte-compares the Merchant's quote response, which
+    carries no details echo, so details are pinned by the cleared basket and
+    the merchant order row rather than by the byte comparison.
     """
     if not ctx.ready():
         raise CheckoutRefused(
@@ -354,12 +361,22 @@ async def start(
     assert ctx.trait is not None
 
     created = await ctx.trait.orders_create(
-        cart_id, lines, destination, contact, fulfillment_option_id, agent_id=agent_id or None
+        cart_id,
+        lines,
+        destination,
+        contact,
+        fulfillment_option_id,
+        agent_id=agent_id or None,
+        details=details,
     )
     salt = bytes.fromhex(created.order_salt_hex)  # request memory only (§6.3a)
 
     quote, quote_bytes = await ctx.trait.quote(
-        lines, destination, fulfillment_option_id=fulfillment_option_id, discount_code=discount_code
+        lines,
+        destination,
+        fulfillment_option_id=fulfillment_option_id,
+        discount_code=discount_code,
+        details=details,
     )
     created_at = datetime.now(UTC)
     expiry = (created_at + CHECKOUT_TTL).isoformat().replace("+00:00", "Z")

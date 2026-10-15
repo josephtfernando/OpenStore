@@ -43,6 +43,10 @@ class FakeProvider(PaymentProvider):
 
     name: str = "fake"
     webhook_secret: str = "demo-webhook-secret"  # noqa: S105 - the demo rail, never a deployment one
+    public_origin: str = "http://spoiledduckie.localhost"
+    """Where its Approve page lives. The default keeps unit tests hermetic;
+    a real deploy passes its public origin so the tap redirect lands on the
+    host the Consumer is actually looking at."""
     links: dict[str, _Link] = field(default_factory=dict)
     refunds: dict[str, RefundResult] = field(default_factory=dict)
     #: Set to make `make_link` raise after the link exists but before the caller
@@ -61,7 +65,7 @@ class FakeProvider(PaymentProvider):
             raise ConnectionError("crashed after the link was created, before the response")
         return PaymentLink(
             link_id=link_id,
-            url=f"http://spoiledduckie.localhost/agentic/fake-pay/{link_id}",
+            url=f"{self.public_origin.rstrip('/')}/agentic/fake-pay/{link_id}",
             amount_minor=amount_minor,
             currency=currency,
             expires_in_seconds=expires_in_seconds,

@@ -204,10 +204,12 @@ class Protocol(StrEnum):
 
 @unique
 class Door(StrEnum):
-    """The nine doors of the Merchant-truth trait (§6.1). Door 9 `QUOTE` is
-    read-only and side-effect-free; every mutating door takes an idempotency
-    key, and `ORDERS_CREATE` keys on `cart_id:attempt` because it is the door
-    that produces the `order_id`."""
+    """The Merchant-truth trait (§6.1). Nine doors are required; door 10
+    `REQUIREMENTS_READ` is optional — a Merchant that does not implement it
+    gets the fixed buyer-shape (Destination + Contact) and nothing breaks.
+    Door 9 `QUOTE` is read-only and side-effect-free; every mutating door takes
+    an idempotency key, and `ORDERS_CREATE` keys on `cart_id:attempt` because
+    it is the door that produces the `order_id`."""
 
     CATALOG_READ = "catalog.read"
     STOCK_READ = "stock.read"
@@ -219,6 +221,7 @@ class Door(StrEnum):
     ORDERS_READ = "orders.read"
     ORDERS_SET_STATUS = "orders.set-status"
     QUOTE = "quote"
+    REQUIREMENTS_READ = "requirements.read"
 
 
 @unique
@@ -286,6 +289,7 @@ class ToolName(StrEnum):
     CLEAR_BASKET = "clear-basket"
     SET_DESTINATION = "set-destination"
     SET_CONTACT = "set-contact"
+    SET_DETAILS = "set-details"
     CHOOSE_FULFILLMENT = "choose-fulfillment"
     APPLY_PUBLIC_CODE = "apply-public-code"
     START_CHECKOUT = "start-checkout"
@@ -310,6 +314,7 @@ TOOL_SCOPES: dict[ToolName, Scope] = {
     ToolName.CLEAR_BASKET: Scope.BUILD_BASKET,
     ToolName.SET_DESTINATION: Scope.BUILD_BASKET,
     ToolName.SET_CONTACT: Scope.BUILD_BASKET,
+    ToolName.SET_DETAILS: Scope.BUILD_BASKET,
     ToolName.CHOOSE_FULFILLMENT: Scope.BUILD_BASKET,
     ToolName.APPLY_PUBLIC_CODE: Scope.BUILD_BASKET,
     ToolName.START_CHECKOUT: Scope.START_CHECKOUT,

@@ -145,6 +145,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     policy = current_policy()
     passkey_rp = _passkey_rp_for(settings, merchant_domain, policy, sessionmaker)
+    rp_id = settings.webauthn_rp_id or merchant_domain
+    origin = settings.openstore_public_origin or f"https://{rp_id}"
+    rp_mismatch = _origin_rp_mismatch(origin, rp_id)
+    mismatch_note = ""
+    if rp_mismatch and passkey_rp is not None:
+        # Warn-only by decision: the ceremony would die in the browser with an
+        # unusable rp.id, so the page hides the button and says why — every
+        # other authority kind keeps working.
+        mismatch_note = f"passkeys are set up for {rp_id}, not for {_origin_host(origin)}"
+        logging.getLogger("openstore").warning(
+            "PASSKEY ORIGIN MISMATCH: %s — the passkey button is hidden until the "
+            "RP ID and the public origin name the same host again.",
+            mismatch_note,
+        )
     tokens = TokenStore(sessionmaker=sessionmaker)
     checkout_context = CheckoutContext(
         trait=trait,
@@ -169,7 +183,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             merchant_domain=merchant_domain,
             merchant_name=settings.webauthn_rp_name or "This shop",
             enabled_methods=policy.enabled_methods,
-            passkey_enabled=passkey_rp is not None,
+            passkey_enabled=passkey_rp is not None and not rp_mismatch,
+            origin_mismatch_note=mismatch_note,
             demo=settings.openstore_demo_mode,
         )
     )
@@ -186,6 +201,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         settings.trait_base_url or "NOT CONFIGURED - the feed will be empty",
     )
 
+    # The door-10 snapshot: fetched once here so the first tools/list and card
+    # already speak this Merchant's extras, then refreshed in the background.
+    # A Merchant with no door 10 keeps the fixed shape — absence is supported.
+    from openstore.sidecar.protocols.agent_routes import refresh_requirements
+
+    await refresh_requirements()
+    requirements_task: asyncio.Task[None] | None = None
+    if trait is not None:
+        requirements_task = asyncio.create_task(_refresh_requirements_forever())
+
     # The expiry sweeper. Without it `expires_at` is a sentence in the spec: an
     # abandoned tap holds Merchant stock until this process restarts, which is
     # an availability hole any self-registered stranger can open at will. It
@@ -201,12 +226,48 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    if sweeper_task is not None:
-        sweeper_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await sweeper_task
+    for task in (requirements_task, sweeper_task):
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
     if engine is not None:
         await engine.dispose()
+
+
+async def _refresh_requirements_forever() -> None:
+    """Background door-10 refresh. Failures keep the last snapshot by design
+    (see `refresh_requirements`) — this loop only schedules the attempt."""
+    from openstore.sidecar.protocols.agent_routes import (
+        REQUIREMENTS_REFRESH_SECONDS,
+        refresh_requirements,
+    )
+
+    while True:
+        await asyncio.sleep(REQUIREMENTS_REFRESH_SECONDS)
+        await refresh_requirements()
+
+
+def _origin_host(origin: str) -> str:
+    """Host part of an origin, lowercased, without port or brackets."""
+    from urllib.parse import urlparse
+
+    host = urlparse(origin).hostname or ""
+    return host.lower()
+
+
+def _origin_rp_mismatch(origin: str, rp_id: str) -> bool:
+    """True when a passkey ceremony minted for `rp_id` cannot run on `origin`.
+
+    WebAuthn binds the ceremony to the RP ID: the browser refuses when the id
+    is neither the origin host nor a registrable parent of it. Warn-only by
+    decision — the deploy keeps serving every other authority kind.
+    """
+    host = _origin_host(origin)
+    rp = rp_id.strip().lower()
+    if not host or not rp:
+        return False
+    return host != rp and not host.endswith(f".{rp}")
 
 
 def _provider_for(settings: Settings) -> Any:
@@ -226,7 +287,9 @@ def _provider_for(settings: Settings) -> Any:
         )
     from openstore.sidecar.provider.fake import FakeProvider
 
-    return FakeProvider()
+    return FakeProvider(
+        public_origin=settings.openstore_public_origin or "http://spoiledduckie.localhost"
+    )
 
 
 def _passkey_rp_for(
@@ -459,6 +522,19 @@ def readyz() -> JSONResponse:
                     "This sidecar holds no signing key, so its JWKS is empty, no receipt can "
                     "be sealed, and an agent pinning this shop's keys will refuse it. Set "
                     "SIDECAR_SIGNING_KEY_PATH."
+                ),
+            }
+        )
+    rp_id = settings.webauthn_rp_id or settings.openstore_merchant_domain
+    origin = settings.openstore_public_origin or f"https://{rp_id}"
+    if _origin_rp_mismatch(origin, rp_id):
+        warnings.append(
+            {
+                "code": "origin-rp-mismatch",
+                "detail": (
+                    f"Passkeys are set up for {rp_id}, not for {_origin_host(origin)}: "
+                    f"the approve page hides the passkey button until both name the "
+                    f"same host. Everything else keeps working."
                 ),
             }
         )

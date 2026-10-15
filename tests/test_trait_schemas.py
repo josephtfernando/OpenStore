@@ -1,4 +1,4 @@
-"""The schemas are valid, cover all nine doors, and accept the golden Quotes."""
+"""The schemas are valid, cover all doors, and accept the golden Quotes."""
 
 from __future__ import annotations
 
@@ -54,7 +54,8 @@ def test_both_schemas_are_themselves_valid() -> None:
 
 
 def test_every_door_has_a_request_and_response_shape() -> None:
-    """Nine doors, and the registry is the list — not this file."""
+    """Nine required doors plus the optional tenth, and the registry is the
+    list — not this file."""
     defs = DOORS_SCHEMA["$defs"]
     for door in Door:
         assert door.value in defs, f"door {door.value} has no shape"
@@ -160,6 +161,20 @@ def test_models_and_schema_agree_on_the_quote_line() -> None:
 
     schema_fields = set(QUOTE_SCHEMA["$defs"]["quoteLine"]["properties"])
     assert schema_fields == set(QuoteLine.model_fields)
+
+
+def test_models_and_schema_agree_on_requirements() -> None:
+    """Door 10, same rule as every other door: one shape in two places is a
+    divergence waiting to refuse a correct Merchant."""
+    from openstore.sidecar.trait.models import RequirementField, Requirements
+
+    response = DOORS_SCHEMA["$defs"]["requirements.read"]["response"]
+    assert set(response["required"]) == {"fields"}
+    item_props = set(response["properties"]["fields"]["items"]["properties"])
+    assert item_props == set(RequirementField.model_fields)
+    assert set(Requirements.model_fields) == {"fields"}
+    # Declaration caps match on both sides.
+    assert response["properties"]["fields"]["maxItems"] == 20
 
 
 def test_the_fake_quotes_something_the_schema_accepts() -> None:

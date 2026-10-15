@@ -35,6 +35,9 @@ baskets = Table(
     Col("contact", Text, nullable=False),
     Col("fulfillment_option_id", String(64), nullable=False),
     Col("discount_code", String(64), nullable=True),
+    # Door-10 buyer details (flat string map, merchant-declared keys). Nullable
+    # so pre-A1 rows read back as empty; never part of tax/address semantics.
+    Col("details", Text, nullable=True),
     Col("updated_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -50,6 +53,9 @@ class Basket:
     contact: dict[str, str] = field(default_factory=dict)
     fulfillment_option_id: str = ""
     discount_code: str | None = None
+    details: dict[str, str] = field(default_factory=dict)
+    """Door-10 values, keyed by merchant-declared keys. Kept out of
+    Destination/Contact on purpose: these never feed tax or address logic."""
 
     def add(self, sku: str, qty: int, parent: str | None = None) -> None:
         """Quantities accumulate per SKU: two `add-line` calls for one SKU are
@@ -130,6 +136,7 @@ class BasketStore:
         if row is None:
             return Basket(agent_id=agent_id)
         destination = json.loads(row.destination) if row.destination else None
+        details_raw = getattr(row, "details", None)
         return Basket(
             agent_id=row.agent_id,
             cart_id=row.cart_id,
@@ -138,6 +145,7 @@ class BasketStore:
             contact=json.loads(row.contact),
             fulfillment_option_id=row.fulfillment_option_id,
             discount_code=row.discount_code,
+            details=dict(json.loads(details_raw)) if details_raw else {},
         )
 
     async def save(self, basket: Basket) -> None:
@@ -152,6 +160,7 @@ class BasketStore:
             "contact": json.dumps(basket.contact),
             "fulfillment_option_id": basket.fulfillment_option_id,
             "discount_code": basket.discount_code,
+            "details": json.dumps(basket.details),
             "updated_at": datetime.now(UTC),
         }
         async with session_scope(self._maker()) as session:
