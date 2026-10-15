@@ -1,10 +1,82 @@
 # LOGS
 
-> Historical running record of the MVP build. Formerly root `LOGS.md`. Frozen; new work is recorded in new documents, not appended here.
+> Running record of the MVP build. Formerly root `LOGS.md`. Frozen on 2026-09-23 during the docs reorganization; resumed 2026-10-15 at the operator's request.
 
 Running record of changes and decisions for the OpenStore MVP build. Newest entry at the top. Every entry: what changed, why, and what it means for anyone executing `SPECS/PLAN.md`.
 
 ---
+
+## 2026-10-15 · Door 10, and every shop becomes connectable by a pasted URL
+
+Logged late: the work below landed 2026-09-26/27 and sat uncommitted on `main`
+until now, when it was reviewed, split into three commits, and committed. It was
+one session's answer to "point a stock MCP client at a shop", and it turned into
+two features plus a hardening pass.
+
+**The optional tenth door (`requirements.read`).** The trait had nine doors and
+a fixed buyer shape: address and contact, nothing else. A Merchant that needs
+something more — a delivery slot, gate instructions — had no way to say so, and
+an agent had no way to learn it except by being refused. Door 10 is read-only
+and optional: a Merchant declares flat string/enum fields (at most 20, keys
+`^[a-z][a-z0-9_]{0,63}$`), and the sidecar snapshots the declaration (refreshed
+every 5 minutes), publishes it in the shop card's `requires`, and renders it as
+the `set-details` tool's JSON Schema. One vocabulary in both places, so a client
+cannot trust the card and be refused by the tool. A Merchant without door 10
+keeps the fixed shape and nothing breaks — absence is a supported answer, not a
+failure. `pii: true` declarations are refused as a whole: there is nowhere to
+store dynamic PII honestly until generic receipt commitments exist, so the
+Merchant keeps the fixed shape and the refusal is loud in the boot log.
+
+`set-details` is the fifteenth tool. Details live on the basket, ride into
+`orders.create` and `quote` (each only when non-empty, so a Merchant whose
+door-7/9 schema predates details is not tripped by an always-present key), and
+are validated against the declaration the sidecar holds — never a second copy of
+the rules. The demo merchant site implements door 10 with `delivery_slot` (an
+enum) and `delivery_instructions`; the WooCommerce adapter declares no extras.
+
+**Generic-agent hardening, found alongside it.** Every refusal an agent has to
+recover from now carries machine-readable fields — `missing`, `unknown`,
+`offered`, `any_of` — so a model retries from data instead of parsing a
+sentence. Destination aliases (`address_line1`, `zip`, `pincode`, `town`, …) are
+normalized at the agent boundary while the trait contract stays strict. The
+nested schemas for `set-destination` / `set-contact` / `set-details` are derived
+from the models themselves, and every tool description states its prerequisites
+and its next step.
+
+**Public-origin hardening.** Driving the demo behind a tunnel exposed two things
+that only bite off `*.localhost`: a WebAuthn ceremony minted for one host cannot
+run on another, so the approve page now hides the passkey button and says why
+when the public origin and the RP ID disagree (`/readyz` warns too), and
+`FakeProvider` links now point at the deploy's public origin rather than the
+demo default. Every other authority kind keeps working.
+
+**OAuth 2.1 with Dynamic Client Registration.** A stock MCP client can now
+connect with nothing but a pasted URL. `initialize`, `notifications/initialized`
+and `tools/list` are public (the same bytes as `GET /agent/tools`), and
+anonymous `search` / `read-item` serve the already-public catalogue under IP
+limits; everything with a basket stays behind Bearer + scopes. The sidecar
+advertises `/.well-known/oauth-authorization-server` and RFC 9728
+protected-resource metadata, serves `/agent/oauth/{register,authorize,token}`,
+and answers a missing token with a 401 that names the resource metadata so a
+generic client discovers sign-in by itself. Registration is open, like
+`/agent/register`. Access tokens are the existing opaque Bearer tokens at
+`SELF_REGISTERED` tier with the same four scopes: reputation buys throughput
+only, `place-order` still returns an approve URL, and the Gate still refuses
+spend without fresh human Authority. `agent_id` is the DCR `client_id`, so each
+registration gets its own basket and its own rate budget. `docs/Claude-Setup.md`
+documents the flow; `scripts/funnel.sh` puts the demo behind Tailscale Funnel
+for a real custom-connector test.
+
+**Found while reviewing to commit:** `test_purchase_live.py` fetched
+`/receipt/<id>` and called `.json()` on it, but that route serves the HTML
+viewer — the JSON is at `/receipt/<id>.json`. It only stayed hidden because the
+live suite is skipped when no stack is running.
+
+Committed as `ce90fe4` (door 10 + agent surface + public-origin hardening),
+`c0bd935` (OAuth 2.1 + DCR), `15ccc78` (the receipt-test fix). 672 tests pass,
+20 skipped; `ruff` and `mypy` clean. Not yet exercised live against a real
+Claude connector — the funnel path is written and documented but unrun from
+here.
 
 ## 2026-09-22 · Mutation testing reaches the passkey ceremony; the two most consequential finds of the pass
 
