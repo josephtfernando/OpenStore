@@ -232,7 +232,7 @@ def test_a_whole_purchase_ends_in_a_verified_receipt(
     assert paid.status_code == 303, paid.text
     receipt_id = paid.headers["location"].rsplit("/", 1)[1]
 
-    receipt = shop.get(f"/receipt/{receipt_id}").json()
+    receipt = shop.get(f"/receipt/{receipt_id}.json").json()
     assert receipt["verification"]["status"] == "VALID"
     body = receipt["receipt"]
     assert [s["name"] for s in body["sections"]] == [
