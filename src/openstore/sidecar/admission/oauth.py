@@ -105,6 +105,19 @@ class Admission:
             callback_url=callback_url,
         )
 
+    def issue_for_oauth(
+        self, client_id: str, *, name: str = "", profile_url: str = ""
+    ) -> AgentToken:
+        """Access token for an OAuth DCR client.
+
+        Same four scopes, `SELF_REGISTERED` tier — reputation buys throughput
+        only, and the Gate still refuses spend without fresh human Authority.
+        `agent_id` is the DCR `client_id`, so each registration gets its own
+        basket and rate budget.
+        """
+        self._refuse_if_blocked(client_id)
+        return self._issue(client_id, Tier.SELF_REGISTERED, name=name, profile_url=profile_url)
+
     def _refuse_if_blocked(self, agent_id: str) -> None:
         if agent_id in self.blocklist:
             raise TraitError(ReasonCode.AGENT_BLOCKED, "this agent is blocked by the Merchant")

@@ -178,9 +178,93 @@ def test_the_tool_list_is_public(client: TestClient, surface: AgentSurface) -> N
 def test_the_tool_surface_needs_a_token_and_says_how_to_get_one(
     client: TestClient, surface: AgentSurface
 ) -> None:
-    response = client.post("/agent/mcp", json={"tool": "search"})
+    from tests.mcp_helpers import mcp_request
+
+    response = client.post("/agent/mcp", json=mcp_request("add-line", sku="X", qty=1))
     assert response.status_code == 401
     assert "/agent/register" in response.json()["error"]["detail"]
+
+
+def test_mcp_handshake_is_public_for_stock_clients(
+    client: TestClient, surface: AgentSurface
+) -> None:
+    """Claude custom connector / generic MCP discovery with a pasted URL only.
+
+    `initialize`, `notifications/initialized` and `tools/list` answer with no
+    token — the same bytes as the already-public `GET /agent/tools`. They
+    touch no basket, DB, stock or order. `tools/call` without a token still
+    refuses above.
+    """
+    init_body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    response = client.post("/agent/mcp", json=init_body)
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["protocolVersion"] == "2025-06-18"
+    assert "tools" in result["capabilities"]
+
+    list_body = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    listed = client.post("/agent/mcp", json=list_body).json()["result"]["tools"]
+    assert {t["name"] for t in listed} == {t.value for t in ToolName}
+
+    notified = client.post(
+        "/agent/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+    )
+    assert notified.status_code == 202
+
+
+def test_mcp_reads_are_open_baskets_still_need_a_token(
+    client: TestClient, surface: AgentSurface
+) -> None:
+    """Paste-URL browsing: `search`/`read-item` answer with no token, IP-limited.
+
+    Catalogue is already public via shop pages, `GET /agent/tools` and the
+    feed — this is the same data over MCP so Claude can browse after pasting
+    the URL. Anything with a basket (`add-line` etc.) still 401s above.
+    """
+    from tests.mcp_helpers import mcp_request, mcp_result
+
+    anon_search = client.post("/agent/mcp", json=mcp_request("search", query=""))
+    assert anon_search.status_code == 200
+    body = anon_search.json()
+    # No trait wired in this fixture, so the tool refuses — the point is it
+    # reached dispatch (isError) rather than auth (401).
+    assert body["result"]["isError"] is True
+    assert "no Merchant wired" in body["result"]["content"][0]["text"]
+
+    # With a catalogue wired, anonymous search returns rows, buckets not counts.
+    from openstore.sidecar.trait.models import CatalogueItem, ProductGroup
+
+    class _Trait:
+        async def catalog_read(self):  # type: ignore[no-untyped-def]
+            from openstore.sidecar.trait.models import Catalog
+
+            return Catalog(
+                groups=[ProductGroup(id="g1", slug="g1", name="Tote")],
+                items=[
+                    CatalogueItem(
+                        sku="SKU-1",
+                        group_id="g1",
+                        name="Tote",
+                        price_minor=1000,
+                        low_stock_threshold=3,
+                        hsn_sac="4202",
+                        gst_rate_bp=1800,
+                    )
+                ],
+            )
+
+        async def stock_read(self, skus):  # type: ignore[no-untyped-def]
+            return {s: 10 for s in skus}
+
+    surface.trait = _Trait()  # type: ignore[assignment]
+    try:
+        ok = client.post("/agent/mcp", json=mcp_request("search", query="tote"))
+        assert ok.status_code == 200
+        results = mcp_result(ok.json())["results"]
+        assert len(results) == 1
+        assert results[0]["availability"] in ("in-stock", "low-stock", "made-to-order")
+    finally:
+        surface.trait = None
 
 
 def test_an_allowlisted_client_gets_the_same_scopes_as_a_stranger(

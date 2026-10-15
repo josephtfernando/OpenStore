@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from openstore.sidecar.admission.oauth import Admission, AgentToken
 from openstore.sidecar.admission.profile import ProfileFetcher, ProfileRefused
@@ -400,23 +400,20 @@ def _jsonrpc_result(id_: Any, result: dict[str, Any]) -> JSONResponse:
 async def mcp_call(request: Request) -> JSONResponse:
     """JSON-RPC 2.0 (ADR-0026): `initialize`, `tools/list`, `tools/call`.
 
-    Bearer auth and rate limits are checked before the body is even parsed as
-    JSON-RPC, because a request with no valid token isn't a request this
-    surface will dispatch regardless of what method it names.
+    `initialize`, `notifications/initialized` and `tools/list` are public so a
+    stock MCP client can discover the shop with a pasted URL and no token — the same bytes as the
+    already-public `GET /agent/tools`. They touch no basket, DB, stock or
+    order, and are IP-rate-limited only.
+
+    `tools/call` (and anything else) stays behind Bearer + scopes + per-agent
+    and per-IP limits. A missing token is a 401 naming `/agent/register`.
     """
-    agent = _bearer(request)
-    if agent is None:
-        return _refuse(
-            ReasonCode.SIGNATURE_INVALID,
-            "This surface needs a token. Register at /agent/register — no Merchant "
-            "action is required.",
-        )
 
-    refused = _limit(request, "agent", agent.agent_id, agent.tier)
-    if refused:
-        return refused
-
-    body_raw: Any = await request.json()
+    body_raw: Any
+    try:
+        body_raw = await request.json()
+    except Exception:
+        return _jsonrpc_error(None, -32700, "Parse error: not JSON")
     if not isinstance(body_raw, dict) or body_raw.get("jsonrpc") != "2.0":
         bad_id = body_raw.get("id") if isinstance(body_raw, dict) else None
         return _jsonrpc_error(bad_id, -32600, "Invalid Request: not a JSON-RPC 2.0 envelope")
@@ -424,23 +421,79 @@ async def mcp_call(request: Request) -> JSONResponse:
     body: dict[str, Any] = body_raw
     id_ = body.get("id")
     method = body.get("method")
-    raw_params = body.get("params")
-    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
 
-    if method == "initialize":
-        return _jsonrpc_result(
-            id_,
-            {
-                "protocolVersion": mcp.PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": _surface.merchant_name, "version": "1"},
+    if method in ("initialize", "notifications/initialized", "tools/list"):
+        try:
+            _surface.limiter.check("ip", _client_ip(request), tier=Tier.SELF_REGISTERED)
+        except TraitError as exc:
+            return _refuse(exc.code, exc.detail)
+        if method == "initialize":
+            return _jsonrpc_result(
+                id_,
+                {
+                    "protocolVersion": mcp.PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": _surface.merchant_name, "version": "1"},
+                },
+            )
+        if method == "notifications/initialized":
+            # A notification carries no id and gets no response body (MCP §2.5).
+            return JSONResponse(status_code=202, content=None)
+        if method == "tools/list":
+            return _jsonrpc_result(id_, {"tools": mcp.tools_list(_surface.requirements)})
+
+    if method == "tools/call" and not request.headers.get("authorization"):
+        raw_early: Any = body.get("params")
+        early_params: dict[str, Any] = raw_early if isinstance(raw_early, dict) else {}
+        early_tool: ToolName | None
+        try:
+            early_tool = ToolName(str(early_params.get("name", "")))
+        except ValueError:
+            early_tool = None
+        if early_tool in (ToolName.SEARCH, ToolName.READ_ITEM):
+            try:
+                _surface.limiter.check("ip", _client_ip(request), tier=Tier.SELF_REGISTERED)
+            except TraitError as exc:
+                return _refuse(exc.code, exc.detail)
+            raw_early_args: Any = early_params.get("arguments")
+            early_args: dict[str, Any] = raw_early_args if isinstance(raw_early_args, dict) else {}
+            try:
+                early_result = await _run_tool(early_tool, f"ip:{_client_ip(request)}", early_args)
+            except ToolRefused as refusal:
+                return _jsonrpc_result(
+                    id_, mcp.call_error(refusal.code, refusal.detail, **refusal.fields)
+                )
+            except TraitError as exc:
+                return _jsonrpc_result(id_, mcp.call_error(exc.code, exc.detail, **exc.fields))
+            return _jsonrpc_result(id_, mcp.call_result(early_result))
+
+    agent = _bearer(request)
+    if agent is None:
+        error = TraitError(
+            ReasonCode.SIGNATURE_INVALID,
+            "This surface needs a token. Connect with OAuth (paste the URL, "
+            "click Allow) or register at /agent/register — no Merchant action "
+            "is required.",
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error.to_payload(),
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer resource_metadata="'
+                    + _origin()
+                    + '/.well-known/oauth-protected-resource", '
+                    'error="invalid_token"'
+                )
             },
         )
-    if method == "notifications/initialized":
-        # A notification carries no id and gets no response body (MCP §2.5).
-        return JSONResponse(status_code=202, content=None)
-    if method == "tools/list":
-        return _jsonrpc_result(id_, {"tools": mcp.tools_list()})
+
+    refused = _limit(request, "agent", agent.agent_id, agent.tier)
+    if refused:
+        return refused
+
+    raw_params = body.get("params")
+    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
     if method != "tools/call":
         return _jsonrpc_error(id_, -32601, f"Method not found: {method!r}")
 
@@ -1007,3 +1060,286 @@ async def feed() -> JSONResponse:
             exposed=_surface.exposed,
         )
     )
+
+
+# ── MCP OAuth 2.1 + DCR (paste-URL connect, no config-file editing) ──
+#
+# A stock client pastes `{origin}/agent/mcp`, discovers
+# `/.well-known/oauth-authorization-server`, registers itself (RFC 7591), the
+# human clicks Allow once on this domain, and the client exchanges the code
+# (PKCE S256) for short access tokens plus a rotating refresh token. No Bearer
+# is ever pasted anywhere.
+#
+# Endpoints live under `/agent/oauth/*` so the existing edge split
+# (`/agent/*` → sidecar) routes them with no proxy change; the metadata URLs
+# are arbitrary strings the client follows, so the prefix is invisible.
+
+
+def _oauth() -> Any:
+    """The deploy's OAuth server, lazily created so unit tests that inject
+    their own surface (without one) get a working default instead of a 500."""
+    from openstore.sidecar.admission.oauth_server import OAuthServer
+
+    if _surface.oauth_server is None:
+        _surface.oauth_server = OAuthServer()
+    return _surface.oauth_server
+
+
+def _oauth_metadata() -> dict[str, Any]:
+    origin = _origin()
+    return {
+        "issuer": origin,
+        "authorization_endpoint": f"{origin}/agent/oauth/authorize",
+        "token_endpoint": f"{origin}/agent/oauth/token",
+        "registration_endpoint": f"{origin}/agent/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+        "scopes_supported": ["search", "build-basket", "start-checkout", "confirm"],
+    }
+
+
+def _resource_metadata() -> dict[str, Any]:
+    origin = _origin()
+    return {
+        "resource": f"{origin}/agent/mcp",
+        "authorization_servers": [origin],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["search", "build-basket", "start-checkout", "confirm"],
+    }
+
+
+@router.get("/.well-known/oauth-authorization-server")
+def oauth_server_metadata() -> dict[str, Any]:
+    return _oauth_metadata()
+
+
+@router.get("/.well-known/oauth-protected-resource")
+def oauth_resource_metadata() -> dict[str, Any]:
+    return _resource_metadata()
+
+
+@router.get("/.well-known/oauth-protected-resource/agent/mcp")
+def oauth_resource_metadata_mcp() -> dict[str, Any]:
+    """Path-inserted variant (RFC 9728 §3.3) — the one generic clients fetch."""
+    return _resource_metadata()
+
+
+@router.post("/agent/oauth/register")
+async def oauth_register(request: Request) -> JSONResponse:
+    """RFC 7591 Dynamic Client Registration. Open, like `/agent/register`."""
+    try:
+        _surface.limiter.check("ip", _client_ip(request), tier=Tier.SELF_REGISTERED)
+    except TraitError as exc:
+        return _refuse(exc.code, exc.detail)
+    try:
+        body = await request.json()
+    except Exception:
+        return _refuse(ReasonCode.NOT_FOUND, "register needs {redirect_uris: [...]} as JSON")
+    if not isinstance(body, dict):
+        return _refuse(ReasonCode.NOT_FOUND, "register needs {redirect_uris: [...]} as JSON")
+    redirect_uris = body.get("redirect_uris") or []
+    if isinstance(redirect_uris, str):
+        redirect_uris = [redirect_uris]
+    try:
+        client = _oauth().register(
+            [str(u) for u in redirect_uris],
+            client_name=str(body.get("client_name", "")),
+        )
+    except ValueError as exc:
+        return _refuse(ReasonCode.NOT_FOUND, str(exc))
+    return JSONResponse(
+        status_code=201,
+        content={
+            "client_id": client.client_id,
+            "client_secret": client.client_secret,
+            "redirect_uris": list(client.redirect_uris),
+            "client_name": client.client_name,
+            "token_endpoint_auth_method": "client_secret_post",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "scope": "search build-basket start-checkout confirm",
+        },
+    )
+
+
+def _consent_page(
+    *,
+    merchant_name: str,
+    client_name: str,
+    client_id: str,
+    redirect_uri: str,
+    scope: str,
+    state: str,
+    code_challenge: str,
+    demo: bool,
+) -> str:
+    import html
+
+    def esc(value: str) -> str:
+        return html.escape(value, quote=True)
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect to {esc(merchant_name)}?</title></head>
+<body style="font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem">
+<h1>Connect {esc(client_name or 'this assistant')} to {esc(merchant_name)}?</h1>
+<p>It will be able to <strong>search the catalogue</strong>, <strong>build a
+basket</strong> and <strong>start checkouts</strong>. It will <strong>never</strong>
+spend: every purchase ends in your tap on this shop's own approve page.</p>
+{"<p><strong>Demo shop — no real money moves.</strong></p>" if demo else ""}
+<form method="post" action="/agent/oauth/authorize">
+<input type="hidden" name="client_id" value="{esc(client_id)}">
+<input type="hidden" name="redirect_uri" value="{esc(redirect_uri)}">
+<input type="hidden" name="scope" value="{esc(scope)}">
+<input type="hidden" name="state" value="{esc(state)}">
+<input type="hidden" name="code_challenge" value="{esc(code_challenge)}">
+<button type="submit" name="decision" value="allow">Allow</button>
+<button type="submit" name="decision" value="deny">Deny</button>
+</form></body></html>"""
+
+
+@router.get("/agent/oauth/authorize")
+async def oauth_authorize_get(request: Request) -> Any:
+    """Consent screen. Public — the human clicking Allow *is* the auth."""
+    query = request.query_params
+    client_id = str(query.get("client_id", ""))
+    redirect_uri = str(query.get("redirect_uri", ""))
+    if query.get("response_type", "code") != "code":
+        return _refuse(ReasonCode.NOT_FOUND, "only response_type=code is supported")
+    if str(query.get("code_challenge_method", "S256")) != "S256":
+        return _refuse(ReasonCode.NOT_FOUND, "only PKCE S256 is supported")
+    client = _oauth().clients.get(client_id)
+    if client is None:
+        return _refuse(ReasonCode.SIGNATURE_INVALID, "unknown client_id — register first")
+    if redirect_uri not in client.redirect_uris:
+        return _refuse(ReasonCode.NOT_FOUND, "redirect_uri does not match this registration")
+    if not query.get("code_challenge"):
+        return _refuse(ReasonCode.NOT_FOUND, "code_challenge (PKCE S256) is required")
+    return HTMLResponse(
+        _consent_page(
+            merchant_name=_surface.merchant_name,
+            client_name=client.client_name,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=str(query.get("scope", "search build-basket start-checkout confirm")),
+            state=str(query.get("state", "")),
+            code_challenge=str(query.get("code_challenge", "")),
+            demo=_surface.demo,
+        )
+    )
+
+
+@router.post("/agent/oauth/authorize")
+async def oauth_authorize_post(request: Request) -> Any:
+    """Human clicked Allow or Deny. Allow mints a single-use code and 302s
+    back to the client's redirect_uri; Deny redirects with access_denied."""
+    from urllib.parse import parse_qs, urlencode
+
+    raw = (await request.body()).decode("utf-8", "replace")
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            import json as json_mod
+
+            parsed = json_mod.loads(raw) if raw.strip() else {}
+            form = dict(parsed) if isinstance(parsed, dict) else {}
+        except Exception:
+            form = {}
+    else:
+        # Urlencoded (browser consent form) parsed directly: Starlette's
+        # `request.form()` asserts `python-multipart` is installed even for
+        # urlencoded bodies, and this surface adds no dependency for it —
+        # same pattern as the approve page's `_form`.
+        form = {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+    client_id = str(form.get("client_id", ""))
+    redirect_uri = str(form.get("redirect_uri", ""))
+    state = str(form.get("state", ""))
+    scope = str(form.get("scope", "search build-basket start-checkout confirm"))
+    challenge = str(form.get("code_challenge", ""))
+    decision = str(form.get("decision", ""))
+    client = _oauth().clients.get(client_id)
+    if client is None or redirect_uri not in client.redirect_uris:
+        return _refuse(ReasonCode.SIGNATURE_INVALID, "unknown client or redirect_uri")
+    sep = "&" if "?" in redirect_uri else "?"
+    if decision != "allow":
+        location = f"{redirect_uri}{sep}{urlencode({'error': 'access_denied', 'state': state})}"
+        return JSONResponse(status_code=302, content=None, headers={"location": location})
+    try:
+        code = _oauth().issue_code(client_id, redirect_uri, challenge, scopes=tuple(scope.split()))
+    except ValueError as exc:
+        return _refuse(ReasonCode.NOT_FOUND, str(exc))
+    location = f"{redirect_uri}{sep}{urlencode({'code': code.code, 'state': state})}"
+    return JSONResponse(status_code=302, content=None, headers={"location": location})
+
+
+@router.post("/agent/oauth/token")
+async def oauth_token(request: Request) -> JSONResponse:
+    """Exchange a code (PKCE) or rotate a refresh token. Returns Bearer access
+    tokens the MCP surface already validates — no new credential type."""
+    from urllib.parse import parse_qs
+
+    from openstore.sidecar.admission.oauth_server import decode_client_assertion
+
+    raw = (await request.body()).decode("utf-8", "replace")
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            import json as json_mod
+
+            body_raw = json_mod.loads(raw) if raw.strip() else {}
+            params: dict[str, Any] = dict(body_raw) if isinstance(body_raw, dict) else {}
+        except Exception:
+            params = {}
+    else:
+        params = {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+    grant = str(params.get("grant_type", ""))
+    basic = decode_client_assertion(request.headers.get("authorization", ""))
+    client_id = str(params.get("client_id", "") or (basic[0] if basic else ""))
+    secret = str(params.get("client_secret", "") or (basic[1] if basic else ""))
+    if not client_id or not _oauth().check_client_secret(client_id, secret):
+        return _refuse(ReasonCode.SIGNATURE_INVALID, "unknown client or wrong secret")
+    client = _oauth().clients.get(client_id)
+    name = client.client_name if client else ""
+    if grant == "authorization_code":
+        try:
+            _oauth().consume_code(
+                str(params.get("code", "")),
+                client_id=client_id,
+                redirect_uri=str(params.get("redirect_uri", "")),
+                verifier=str(params.get("code_verifier", "")),
+            )
+        except ValueError as exc:
+            return _refuse(ReasonCode.SIGNATURE_INVALID, str(exc))
+        access = _surface.admission.issue_for_oauth(client_id, name=name)
+        refresh = _oauth().issue_refresh(client_id, tuple(sorted(s.value for s in access.scopes)))
+        return JSONResponse(
+            {
+                "access_token": access.token,
+                "token_type": "Bearer",
+                "expires_in": 900,
+                "refresh_token": refresh.token,
+                "scope": "search build-basket start-checkout confirm",
+            }
+        )
+    if grant == "refresh_token":
+        try:
+            old = _oauth().consume_refresh(
+                str(params.get("refresh_token", "")), client_id=client_id
+            )
+        except ValueError as exc:
+            return _refuse(ReasonCode.SIGNATURE_INVALID, str(exc))
+        access = _surface.admission.issue_for_oauth(client_id, name=name)
+        refresh = _oauth().issue_refresh(client_id, old.scopes)
+        return JSONResponse(
+            {
+                "access_token": access.token,
+                "token_type": "Bearer",
+                "expires_in": 900,
+                "refresh_token": refresh.token,
+                "scope": " ".join(old.scopes),
+            }
+        )
+    return _refuse(ReasonCode.NOT_FOUND, "grant_type must be authorization_code or refresh_token")

@@ -76,6 +76,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     merchant_domain = settings.openstore_merchant_domain or "localhost"
     keyring = _load_keyring(settings, merchant_domain)
+    from openstore.sidecar.admission.oauth_server import OAuthServer
+
     configure_surface(
         AgentSurface(
             merchant_domain=merchant_domain,
@@ -102,6 +104,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                     else {}
                 )
             ),
+            oauth_server=OAuthServer(),
         )
     )
     # The money path. Until this existed the Gate, the Ledger, the Provider and
