@@ -430,9 +430,7 @@ def set_contact(basket: Basket, payload: dict[str, Any]) -> None:
     basket.contact = contact
 
 
-def details_missing(
-    requirements: Requirements | None, details: dict[str, str]
-) -> list[str]:
+def details_missing(requirements: Requirements | None, details: dict[str, str]) -> list[str]:
     """Required merchant keys with no value. Empty when the shop declares
     nothing — no declaration means nothing to miss."""
     if requirements is None:

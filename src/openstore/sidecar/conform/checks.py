@@ -413,9 +413,9 @@ async def _requirements_checks(runner: _Runner, client: TraitClient) -> None:
         from openstore.sidecar.trait.models import MAX_REQUIREMENT_FIELDS
 
         assert len(declared.fields) <= MAX_REQUIREMENT_FIELDS
-        assert len({f.key for f in declared.fields}) == len(declared.fields), (
-            "requirement keys must be unique"
-        )
+        assert len({f.key for f in declared.fields}) == len(
+            declared.fields
+        ), "requirement keys must be unique"
         pii = [f.key for f in declared.fields if f.pii]
         assert not pii, (
             f"declares pii:true ({', '.join(pii)}): the sidecar refuses such "

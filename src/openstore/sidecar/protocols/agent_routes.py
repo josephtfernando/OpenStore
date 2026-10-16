@@ -185,6 +185,7 @@ async def refresh_requirements() -> None:
         return
     _surface.requirements = declared
 
+
 _surface = AgentSurface()
 
 
@@ -688,9 +689,7 @@ async def _dispatch(
                     "Nothing is chosen yet. Call choose-fulfillment again with one of these ids."
                 ),
             }
-        return await tools.choose_fulfillment(
-            merchant(), cart(), option, _surface.requirements
-        )
+        return await tools.choose_fulfillment(merchant(), cart(), option, _surface.requirements)
     if tool is ToolName.APPLY_PUBLIC_CODE:
         return await tools.apply_public_code(
             merchant(), cart(), str(payload.get("code", "")), _surface.requirements

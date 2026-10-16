@@ -223,7 +223,9 @@ class Requirements(Strict):
             raise ValueError("requirement keys must be unique")
         for field in self.fields:
             if field.type == "enum" and not (1 <= len(field.values) <= MAX_REQUIREMENT_ENUM_VALUES):
-                raise ValueError(f"{field.key!r}: enum needs 1 to {MAX_REQUIREMENT_ENUM_VALUES} values")
+                raise ValueError(
+                    f"{field.key!r}: enum needs 1 to {MAX_REQUIREMENT_ENUM_VALUES} values"
+                )
             if field.type != "enum" and field.values:
                 raise ValueError(f"{field.key!r}: values only apply to enum fields")
             if field.pattern:
