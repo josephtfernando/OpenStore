@@ -1,26 +1,32 @@
 # OpenStore: Open-Source Storefronts for AI Agents
 
-![CI](https://github.com/ApxllxCartxr/OpenStore/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/josephtfernando/OpenStore/actions/workflows/ci.yml/badge.svg)
 
-OpenStore is a self-hosted sidecar (a service that runs next to an existing shop) that makes one merchant site transactable by any AI buyer agent.
-It translates MCP, UCP, ACP, and AP2 into one money core, so a merchant integrates once instead of once per protocol.
-Agents can search, build a basket, and start a checkout, but only a human tap on the merchant domain moves money. Every order ends in a signed receipt that anyone can verify offline.
+> The agents are already shopping. OpenStore lets your shop answer.
+
+One command makes an ordinary shop transactable by any AI buyer agent. OpenStore is a self-hosted sidecar (a service that runs beside an existing shop). It speaks MCP, UCP, ACP, and AP2, and it maps every protocol onto one money core, so a merchant integrates once instead of once per protocol. Agents can search, build a basket, and start a checkout. Only a human tap on the merchant domain moves money. Every order ends in a signed receipt that anyone can verify offline.
+
+- **Integrate once.** Nine HTTP endpoints connect any shop to every protocol.
+- **Keep control.** The customer, the catalogue, the prices, and the settlement stay with the merchant.
+- **Keep the human.** A UPI PIN or a passkey approves each purchase, on the shop domain.
+
+[Quickstart](#quickstart) · [Watch it work](#watch-it-work) · [Verify a receipt](#verify-a-receipt) · [Documentation](#documentation)
 
 ### Watch it work
 
-Twenty seconds, merchant-first: the agent shops, the human approves on the shop domain, the receipt seals. Click the poster for the full video with music.
+Twenty seconds, merchant-first. The agent shops, the human approves on the shop domain, and the receipt seals. Click the poster for the full video with music.
 
 [![OpenStore launch video poster](assets/brag-poster.jpg)](assets/openstore-brag.mp4)
 
-**Agent builds the basket** — Quote rendered verbatim from the shop, never computed locally:
+**Agent builds the basket.** The Quote comes verbatim from the shop, and the agent never computes it locally:
 
 ![Quote built verbatim from the shop](assets/brag-quote.gif)
 
-**Human approves** — the exact total, on the merchant domain, UPI PIN or passkey:
+**Human approves.** The exact total, on the merchant domain, with a UPI PIN or a passkey:
 
 ![Approve the exact total on the merchant domain](assets/brag-approve.gif)
 
-**Receipt seals** — hash-chained and signed, verifiable offline by anyone:
+**Receipt seals.** Hash-chained and signed, and verifiable offline by anyone:
 
 ![Hash-chained signed receipt](assets/brag-receipt.gif)
 
